@@ -1,0 +1,241 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from collections import deque
+import matplotlib.cm as cm # Para degradados de color
+import matplotlib
+
+
+
+D=0.02 #m
+L1=2.5 *D
+L2=5*D
+D2=2.75*D
+Lt=11.25*D
+D1=2*D
+
+
+def radio_aorta(x_val): #Funcion a trozos que determina la geometria del problema
+    if 0 <= x_val <= L1:
+        return D/2
+    
+    elif L1 <= x_val <= L1+L2:
+        aneurisma= ( ((D2-D)/4)*(1+np.sin(((2*np.pi*(x_val-L1))/L2)-(np.pi/2))) )+D/2
+        return aneurisma
+    
+    else:
+        return D/2
+    
+# Crear la malla 
+nx, ny = 100, 30
+x = np.linspace(0, Lt, nx)
+xi = np.linspace(-1, 1, ny) # Coordenada normalizada de -1 a 1
+
+X = np.zeros((ny, nx))
+Y = np.zeros((ny, nx))
+
+# geometría abstracta a una malla numérica real
+for i in range(nx): # bucle recorre el largo de la arteria (el eje x)
+    R_local = radio_aorta(x[i]) # Que tan ancha es la arteria en x
+    for j in range(ny):#Este bucle recorre la sección vertical en esa posición x específica
+        X[j, i] = x[i] #guarda la posición horizontal.
+        Y[j, i] = xi[j] * R_local # Estirar segun el radio
+
+#------------------- Mapeo de Derivadas ------------------- 
+
+
+# Creamos el arreglo de radios para cada punto en x
+R_limite = np.array([radio_aorta(val) for val in x])
+
+# Calcular la derivada del radio respecto a x (pendiente de la pared)
+dRdx = np.gradient(R_limite, x)
+
+# Calcular los factores de transformación para cada punto (i, j)
+# Estos factores "corrigen" las derivadas en el aneurisma
+inv_R = 1.0 / R_limite[None, :]  # Esto ayuda para la derivada respecto a 'y'
+term_corr = - (xi[:, None] * dRdx) / R_limite # Esto ayuda para la derivada respecto a 'x'
+
+
+
+# Graficar la malla (Grilla)
+plt.figure(figsize=(12, 4))
+
+# Dibujar las líneas verticales
+for i in range(0, nx, 2): # Saltamos de 2 en 2 para que no sea una mancha negra
+    plt.plot(X[:, i], Y[:, i], color='black', linewidth=0.5)
+
+# Dibujar las líneas horizontales
+for j in range(ny):
+    plt.plot(X[j, :], Y[j, :], color='black', linewidth=0.5)
+
+plt.gca().set_aspect('equal')
+plt.title("Dominio Computacional: Malla Ajustada al Aneurisma")
+plt.xlabel("Largo (cm)")
+plt.ylabel("Radio (cm)")
+plt.show()
+
+
+
+
+#------------------- Definimos las ecuaciones que gobiernan el problema ------------------- 
+
+# Parámetros de Carreau (Viscosidad de la sangre)
+mu_0 = 0.056    # Pa.s
+mu_inf = 0.00345 # Pa.s
+delta = 3.313     # s
+n = 0.3568      # Adimensional
+a= 2            #Adimensional
+rho=1050   #kg/m^3
+
+def calcular_viscosidad(u, v, inv_R, term_corr):
+    #Aplicamos regla de la cadena a u(x,xi)
+    ui_xi= np.gradient(u, xi, axis=0)
+    uj_xi = np.gradient(v, xi, axis=0)
+    
+    ui_j_matriz = np.gradient(u, x, axis=1)
+    uj_i_matriz = np.gradient(v, x, axis=1)
+    
+    #Derivadas reales que ocuparemos
+    
+    du_dy = ui_xi * inv_R
+    dv_dy = uj_xi * inv_R
+    du_dx = ui_j_matriz + term_corr * ui_xi
+    dv_dx = uj_i_matriz+ uj_xi * term_corr
+    
+    #Calculamos Dij
+    Dxx = 0.5*(du_dx+du_dx)
+    Dyy = 0.5*(dv_dy+dv_dy)
+    Dxy = 0.5 * (du_dy + dv_dx)
+    Dyx= 0.5*(dv_dx+du_dy)
+    gamma_dot = np.sqrt(2*(Dxx**2 + Dyy**2 + Dxy**2 + Dyx**2))
+    gamma_dot = np.clip(gamma_dot, 1e-7, 1e5)# <--- Evitar ceros e infinitos
+    mu_gamma=(((1+ (delta*gamma_dot)**a )**((n-1)/a))*(mu_0-mu_inf)) + mu_inf
+    
+    return mu_gamma 
+
+
+#------------------- Definimos el metodo a resolver, Chorin ------------------- 
+
+def paso_prediccion(u, v, mu, dt, rho, dx, dxi, inv_R, term_corr):
+    # --- A. Derivadas espaciales ---
+    du_dx_m = np.gradient(u, dx, axis=1)
+    du_dxi = np.gradient(u, dxi, axis=0)
+    du_dx = du_dx_m + term_corr * du_dxi
+    du_dy = inv_R * du_dxi
+
+    dv_dx_m = np.gradient(v, dx, axis=1)
+    dv_dxi = np.gradient(v, dxi, axis=0)
+    dv_dx = dv_dx_m + term_corr * dv_dxi
+    dv_dy = inv_R * dv_dxi 
+
+    # --- Advección ---
+    adv_u = u * du_dx + v * du_dy
+    adv_v = u * dv_dx + v * dv_dy
+
+    # --- Términos Viscosos ---
+    tau_xx = 2 * mu * du_dx
+    tau_yy = 2 * mu * dv_dy
+    tau_xy = mu * (du_dy + dv_dx)
+
+    dtau_xx_dx = np.gradient(tau_xx, dx, axis=1) + term_corr * np.gradient(tau_xx, dxi, axis=0)
+    dtau_xy_dy = inv_R * np.gradient(tau_xy, dxi, axis=0)
+    dif_u = (dtau_xx_dx + dtau_xy_dy) / rho
+
+    dtau_xy_dx = np.gradient(tau_xy, dx, axis=1) + term_corr * np.gradient(tau_xy, dxi, axis=0)
+    dtau_yy_dy = inv_R * np.gradient(tau_yy, dxi, axis=0)
+    dif_v = (dtau_xy_dx + dtau_yy_dy) / rho
+
+    u_star = u + dt * (-adv_u + dif_u)
+    v_star = v + dt * (-adv_v + dif_v)
+    return u_star, v_star
+
+def resolver_poisson_presion(u_star, v_star, dt, rho, dx, dxi, inv_R, term_corr, p_old):
+    du_dx = np.gradient(u_star, dx, axis=1) + term_corr * np.gradient(u_star, dxi, axis=0)
+    dv_dy = inv_R * np.gradient(v_star, dxi, axis=0)
+    rhs = (rho / dt) * (du_dx + dv_dy)
+    
+    dy_matriz = (1.0 / inv_R) * dxi
+    idx = 1.0 / dx**2
+    idy_fila = 1.0 / dy_matriz**2
+    
+    idy = np.tile(idy_fila, (ny, 1)) 
+    central = np.tile(1.0 / (2 * (idx + idy_fila)), (ny, 1))
+    
+    p = p_old.copy()
+    for _ in range(70): # Subimos a 60 para mayor estabilidad
+        p_new = p.copy()
+        term_x = idx * (p[1:-1, 2:] + p[1:-1, :-2])
+        term_y = idy[1:-1, 1:-1] * (p[2:, 1:-1] + p[:-2, 1:-1])
+        p_new[1:-1, 1:-1] = central[1:-1, 1:-1] * (term_x + term_y - rhs[1:-1, 1:-1])
+        
+        # Bordes
+        p_new[0, :] = p_new[1, :]
+        p_new[-1, :] = p_new[-2, :]
+        p_new[:, 0] = p_new[:, 1]
+        p_new[:, -1] = 0
+        p = p_new
+    return p
+
+def paso_correccion(u_star, v_star, p, dt, rho, dx, dxi, inv_R, term_corr):
+    # Gradiente de presión real
+    dp_dx = np.gradient(p, dx, axis=1) + term_corr * np.gradient(p, dxi, axis=0)
+    dp_dy = inv_R * np.gradient(p, dxi, axis=0)
+
+    # Actualización final
+    u_final = u_star - (dt / rho) * dp_dx
+    v_final = v_star - (dt / rho) * dp_dy
+
+    return u_final, v_final
+
+
+
+#------------------- Condiciones iniciales ------------------- 
+
+# 1. Creamos las matrices base
+u = np.zeros((ny, nx))
+v = np.zeros((ny, nx))
+p = np.zeros((ny, nx))
+
+# Forzamos la entrada desde el primer instante 
+# Aunque el resto sea 0, la sangre ya está presionando en x=0
+u[:, 0] = 2.0 * (1 - xi**2)
+
+# Parámetros de control
+dt = 0.00001     # Paso de tiempo muy pequeño para evitar que "explote"
+t = 0
+t_final = 1.0   # Tiempo total de simulación
+iteracion = 0
+
+while t < t_final:
+    u_ant, v_ant, p_ant = u.copy(), v.copy(), p.copy()
+    
+    # Iniciar el fluido lentamente para que no explote la simulacion
+    v_entrada = 0.5 * min(1.0, t / 0.05)
+    u[:, 0] = v_entrada * (1 - xi**2)
+    v[:, 0] = 0
+
+    #  Viscosidad
+    mu = calcular_viscosidad(u_ant, v_ant, inv_R, term_corr)
+    dx, dxi = x[1] - x[0], xi[1] - xi[0]
+    
+    # Chorin
+    u_star, v_star = paso_prediccion(u_ant, v_ant, mu, dt, rho, dx, dxi, inv_R, term_corr)
+    p = resolver_poisson_presion(u_star, v_star, dt, rho, dx, dxi, inv_R, term_corr, p_ant)
+    u, v = paso_correccion(u_star, v_star, p, dt, rho, dx, dxi, inv_R, term_corr)
+    
+    # Condiciones de borde
+    u[:, 0] = v_entrada * (1 - xi**2)
+    v[:, 0] = 0
+    u[0, :], u[-1, :] = 0, 0
+    v[0, :], v[-1, :] = 0, 0
+    u[:, -1], v[:, -1] = u[:, -2], v[:, -2] # Salida libre
+
+    t += dt
+    iteracion += 1
+    if iteracion % 100 == 0:
+        print(f"Tiempo: {t:.5f} s | V_in: {v_entrada:.2f}") #para verificar donde explota la simulacion
+
+
+
+
+
