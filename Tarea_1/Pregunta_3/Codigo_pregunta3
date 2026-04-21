@@ -1,0 +1,329 @@
+
+import numpy as np
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+import matplotlib.animation as animation
+
+# ==========================================
+# (a) Modelo matemático que describe el movimiento de ambos misiles
+# ==========================================
+
+
+#--- Definimos las constantes ---
+rho= 1.225 #Densidad del ambiente en kg/m^3
+Cd= 0.3 #coeficiente de arrastre
+m= 100 #masa del misil kg
+A= 0.05 #Area transversal del misil en m^2
+w= 7.2921159*10**(-5)#Velocidad angular de la tierra rad/s
+g= 9.81 #Aceleracion de gravedad
+R_tierra = 6371000  #Radio de la tierra en metros
+lambda1= np.radians(45)  
+mis_params = (m, rho, Cd, A, w, g, R_tierra, lambda1)
+
+#----- funcion que modela la trayectoria de los misiles -----
+def Modelo_misil(t, variables, m, rho, Cd, A, w, g, R_tierra, lambda1):
+    
+    x, y, z, dxdt, dydt, dzdt = variables
+    v_vec = np.array([dxdt, dydt, dzdt]) # Vector de velocidad
+    v_mag = np.linalg.norm(v_vec) # Magnitud de la velocidad
+    w_vec = w*np.array([0, np.cos(lambda1), np.sin(lambda1)])
+    r_vec = np.array([x, y, z]) # Vector de posicion
+    r_centro = r_vec + np.array([0, 0, R_tierra]) # Vector de posicion segun el sistema inercial de la tierra
+    
+    #Definimos las fuerzas, que estan dividas por la masa
+    Peso = -1*np.array([0, 0, g])
+    Roce =-(1/(2*m))*(rho*Cd*A*v_mag*v_vec)
+    Coriolis = -2*(np.cross(w_vec, v_vec))
+    
+    dv_dt = Peso + Roce + Coriolis
+    return [dxdt, dydt, dzdt, dv_dt[0], dv_dt[1], dv_dt[2]]
+
+#----- Resuelve la función que modela el problema, que representa la trayectoria -----
+def trayectoria(tiempo, Modelo_misil, r_0, theta1, phi1, v_i, params):
+    v_0 =  v_i*np.array([np.cos(theta1)*np.cos(phi1), np.cos(theta1)*np.sin(phi1), np.sin(theta1)])
+    condicion_incial= np.concatenate([r_0, v_0])
+    t_puntos = np.linspace(tiempo[0], tiempo[1], 1000)
+    
+    solucion = solve_ivp(Modelo_misil, tiempo, condicion_incial, args=params, t_eval=t_puntos)
+    return solucion 
+
+#----- Obtiene la posicion en un tiempo determinado -----
+def obtener_posicion_en_t(solucion, t_deseado, etiqueta):
+    # Usamos np.interp para encontrar el valor exacto en t_deseado
+    x = np.interp(t_deseado, solucion.t, solucion.y[0])
+    y = np.interp(t_deseado, solucion.t, solucion.y[1])
+    z = np.interp(t_deseado, solucion.t, solucion.y[2])
+    
+    #print(f"Las coordenadas del {etiqueta} son ({x:.2f}, {y:.2f}, {z:.2f}) en el tiempo {t_deseado:.2f}s")
+    
+    # También retornamos el vector
+    return np.array([x, y, z])
+
+
+
+def funcion_objetivo(parametros_busqueda, sol_obj, params_fisicos):
+    v2, th2_deg, ph2_deg = parametros_busqueda
+    
+    th2 = np.radians(th2_deg)
+    ph2 = np.radians(ph2_deg)
+    
+    # Simulamos el Misil 2 con estos parámetros
+    # Empieza en t=10 y r_0_2 = [5000, 2000, 0]
+    sol_int = trayectoria([10, 150], Modelo_misil, [5000, 2000, 0], th2, ph2, v2, params_fisicos)
+    
+    # Calculamos la distancia mínima de acercamiento
+    # Comparamos en un rango de tiempo común 
+    t_comun = np.linspace(10, 100, 200)
+    distancias = []
+    
+    for t in t_comun:
+        p1 = obtener_posicion_en_t(sol_obj, t, "m1")
+        p2 = obtener_posicion_en_t(sol_int, t, "m2")
+        distancias.append(np.linalg.norm(p1 - p2))
+    
+    dist_minima = min(distancias)
+    return dist_minima
+
+
+
+
+#                                --- SIMULACIÓN MISIL 1  ---
+   
+# ==========================================
+# (b) Simulación misil 1
+# ==========================================                        
+tiempo_1=[0, 1000]
+r_01=[0,0,0]
+theta1= np.radians(45)
+phi1= np.radians(30)
+v_incial= 500 #velocidad incial del misil 1 en m/s
+
+trayectoria_misil1 = trayectoria(tiempo_1, Modelo_misil, r_01, theta1, phi1, v_incial, mis_params)
+
+tiempos = trayectoria_misil1.t
+x_1 = trayectoria_misil1.y[0] # Primera fila: x(t)
+y_1 = trayectoria_misil1.y[1] # Segunda fila: y(t)
+z_1= trayectoria_misil1.y[2] # Tercera fila: z(t)
+
+fig = plt.figure(figsize=(10, 7))
+ax = fig.add_subplot(111, projection='3d')
+ax.plot(x_1[z_1>=0], y_1[z_1>=0], z_1[z_1>=0], label='Trayectoria Misil Objetivo')
+ax.scatter(0, 0, 0, color='blue', marker='^', s=100, label='Lanzadera 1')
+
+ax.set_xlabel('X [m]')
+ax.set_ylabel('Y [m]')
+ax.set_zlabel('Z [m]')
+ax.legend()
+plt.show()
+
+"""              # --- Posicion en el tiempo para el misil 1  ---
+tiempo_consulta_1=10
+pos = obtener_posicion_en_t(trayectoria_misil1, tiempo_consulta_1, "misil 1")
+print("-" * 40)
+print(f"ESTADO DEL MISIL 1 A LOS {tiempo_consulta_1} SEGUNDOS:")
+print(f"Coordenada X: {pos[0]:.2f} m")
+print(f"Coordenada Y: {pos[1]:.2f} m")
+print(f"Coordenada Z: {pos[2]:.2f} m")
+print("-" * 40)
+ """                       
+
+#                               --- SIMULACIÓN MISIL 2  ---
+
+
+# ==========================================
+# (c), (d) Determinar los valores del misil interceptor
+# ==========================================     
+
+# Valores iniciales para empezar a buscar
+r_02 = [600, 45, 150] 
+
+# Límites 
+limites = [(300, 1000), (10, 80), (0, 360)]
+
+# Llamamos a minimize
+print("Buscando parámetros óptimos... esto puede tardar un poco.")   
+resultado = minimize(funcion_objetivo, r_02, args=(trayectoria_misil1, mis_params), method='Nelder-Mead', bounds=limites, tol=1e-2 )
+
+# Extraemos los parámetros del optimizador
+v2_opt, th2_opt, ph2_opt = resultado.x
+dist_final = resultado.fun
+
+
+
+
+# Simulamos el interceptor final con los parámetros óptimos para encontrar el tiempo exacto
+sol_interceptor = trayectoria([10, 150], Modelo_misil, [5000, 2000, 0], np.radians(th2_opt), np.radians(ph2_opt), v2_opt, mis_params)
+
+# Buscamos en qué momento exacto donde la distancia es mínima
+t_busqueda = np.linspace(10, 150, 1000)
+p1_serie = np.array([np.interp(t_busqueda, trayectoria_misil1.t, trayectoria_misil1.y[i]) for i in range(3)])
+p2_serie = np.array([np.interp(t_busqueda, sol_interceptor.t, sol_interceptor.y[i]) for i in range(3)])
+dist_serie = np.linalg.norm(p1_serie - p2_serie, axis=0)
+
+# El tiempo de impacto es donde la distancia es mínima en la serie
+t_choque = t_busqueda[np.argmin(dist_serie)]
+
+# Calculamos las coordenadas (x, y, z) en ese tiempo usando la función original
+x_col, y_col, z_col = obtener_posicion_en_t(trayectoria_misil1, t_choque, "Punto de Colisión")
+
+
+
+
+# ==========================================
+#e)Verifizar la colision o la aproximación
+# ==========================================
+d_tol = 10.0  # Tolerancia para la colisión 
+
+if dist_final <= d_tol:
+    # --- CASO A: COLISIÓN EXITOSA ---
+    print("\n" + "-"*30)
+    print("¡INTERCEPCIÓN EXITOSA!")
+    print("-"*30)
+    print(f"La distancia mínima lograda fue de {dist_final:.2f} m, cumpliendo la tolerancia de {d_tol} m.")
+    
+    # Reporte de parámetros (Inciso c) 
+    print(f"\nPARAMETROS ÓPTIMOS DEL INTERCEPTOR:")
+    print(f"Velocidad inicial (v2,0): {v2_opt:.2f} m/s")
+    print(f"Ángulo de elevación (theta2): {th2_opt:.2f}°")
+    print(f"Azimut (psi2): {ph2_opt:.2f}°")
+    
+    # Tiempo de impacto (Inciso d) 
+    print(f"\nTiempo total desde el lanzamiento del objetivo: {t_choque:.2f} s")
+    print(f"Coordenadas del choque: X={x_col:.2f}, Y={y_col:.2f}, Z={z_col:.2f}")
+    
+    titulo_plot = f"Colisión Confirmada (Distancia: {dist_final:.2f} m)"
+    color_punto = 'green'
+    label_punto = 'Punto de Colisión'
+
+else:
+    # --- CASO B: MÁXIMA APROXIMACIÓN ---
+    print("\n" + "X"*30)
+    print("NO SE LOGRÓ LA COLISIÓN")
+    print("X"*30)
+    print(f"La distancia de aproximación más cercana fue {dist_final:.2f} m.")
+    print(f"No se alcanzó el margen de {d_tol} m.")
+    
+    # Reporte de punto de máxima aproximación  
+    print(f"\nCOORDENADAS DE MÁXIMA APROXIMACIÓN:")
+    print(f"X={x_col:.2f}, Y={y_col:.2f}, Z={z_col:.2f} en t = {t_choque:.2f} s")
+    
+    titulo_plot = f"Máxima Aproximación (Distancia: {dist_final:.2f} m)"
+    color_punto = 'orange'
+    label_punto = 'Punto de Máxima Aproximación'
+    
+    
+"""             # --- Posicion en el tiempo para el misil 2  ---
+tiempo_consulta_2=2
+tiempo_2=[10, 1000]
+trayectoria_misil2 = trayectoria(tiempo_2, Modelo_misil, r_02, th2_opt, ph2_opt, v2_opt, mis_params)
+pos_2 = obtener_posicion_en_t(trayectoria_misil2, tiempo_consulta_2, "misil 2")
+print("-" * 40)
+print(f"ESTADO DEL MISIL 2 A LOS {tiempo_consulta_2} SEGUNDOS:")
+print(f"Coordenada X: {pos_2[0]:.2f} m")
+print(f"Coordenada Y: {pos_2[1]:.2f} m")
+print(f"Coordenada Z: {pos_2[2]:.2f} m")
+print("-" * 40)  
+"""
+    
+    
+# ==========================================
+# (e)Grafíco colisión
+# ==========================================   
+
+fig = plt.figure(figsize=(10, 7))
+ax = fig.add_subplot(111, projection='3d')
+
+# Ploteo del Misil 1 
+ax.plot(x_1[z_1>=0], y_1[z_1>=0], z_1[z_1>=0], label='Trayectoria Misil Objetivo', color='blue', alpha=0.6)
+
+# Ploteo del Misil 2 (Interceptor)
+x2, y2, z2 = sol_interceptor.y[0], sol_interceptor.y[1], sol_interceptor.y[2]
+ax.plot(x2[z2>=0], y2[z2>=0], z2[z2>=0], label='Trayectoria Interceptor', color='red', linewidth=2)
+
+# Marcadores: 
+ax.scatter(5000, 2000, 0, color='red', marker='^', s=100, label='Lanzadera 2')
+ax.scatter(0, 0, 0, color='blue', marker='^', s=100, label='Lanzadera 1')
+ax.scatter(x_col, y_col, z_col, color='green', marker='o', s=100, edgecolor='black', label='Punto de Colisión', zorder=10)
+
+# Línea vertical de referencia al suelo
+ax.plot([x_col, x_col], [y_col, y_col], [0, z_col], color='gray', linestyle='--', alpha=0.3)
+
+# Configuración final
+ax.set_xlabel('X [m]')
+ax.set_ylabel('Y [m]')
+ax.set_zlabel('Z [m]')
+ax.set_title(f"Intercepción exitosa (Distancia final: {dist_final:.2f}m)")
+ax.legend()
+plt.show()
+
+
+# ==========================================
+# (f)Animación de los misiles
+# ==========================================   
+
+# --- PREPARACIÓN DE DATOS PARA LA ANIMACIÓN ---
+# Usamos un tiempo común desde 0 hasta el momento del choque
+t_anim = np.linspace(0, t_choque, 300)
+
+# Posiciones del Misil 1 en cada instante
+x1_anim = np.interp(t_anim, trayectoria_misil1.t, trayectoria_misil1.y[0])
+y1_anim = np.interp(t_anim, trayectoria_misil1.t, trayectoria_misil1.y[1])
+z1_anim = np.interp(t_anim, trayectoria_misil1.t, trayectoria_misil1.y[2])
+
+# Posiciones del Misil 2 (Interceptor)
+# El misil 2 sale en t=10
+x2_anim = np.interp(t_anim, sol_interceptor.t, sol_interceptor.y[0])
+y2_anim = np.interp(t_anim, sol_interceptor.t, sol_interceptor.y[1])
+z2_anim = np.interp(t_anim, sol_interceptor.t, sol_interceptor.y[2])
+
+# --- CONFIGURACIÓN DE LA FIGURA ---
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+
+# Definir los límites del gráfico para que no se mueva durante la animación
+ax.set_xlim(0, 6000)
+ax.set_ylim(0, 6000)
+ax.set_zlim(0, 5000)
+
+# Elementos que se van a actualizar
+line1, = ax.plot([], [], [], color='blue', label='Misil Objetivo', alpha=0.5)
+line2, = ax.plot([], [], [], color='red', label='Interceptor', linewidth=2)
+point1, = ax.plot([], [], [], 'bo') # Cabeza misil 1
+point2, = ax.plot([], [], [], 'ro') # Cabeza misil 2
+
+ax.legend()
+
+# --- Funciones de animación ---
+def init():
+    line1.set_data([], [])
+    line1.set_3d_properties([])
+    line2.set_data([], [])
+    line2.set_3d_properties([])
+    point1.set_data([], [])
+    point1.set_3d_properties([])
+    point2.set_data([], [])
+    point2.set_3d_properties([])
+    return line1, line2, point1, point2
+
+def update(i):
+    # Actualizar estelas
+    line1.set_data(x1_anim[:i], y1_anim[:i])
+    line1.set_3d_properties(z1_anim[:i])
+    
+    line2.set_data(x2_anim[:i], y2_anim[:i])
+    line2.set_3d_properties(z2_anim[:i])
+    
+    # Actualizar cabezas de los misiles
+    point1.set_data([x1_anim[i]], [y1_anim[i]])
+    point1.set_3d_properties(z1_anim[i])
+    
+    point2.set_data([x2_anim[i]], [y2_anim[i]])
+    point2.set_3d_properties(z2_anim[i])
+    
+    return line1, line2, point1, point2
+
+# Crear la animación
+ani = animation.FuncAnimation(fig, update, frames=len(t_anim), init_func=init, blit=True, interval=50)
+
+plt.show()
