@@ -1,0 +1,208 @@
+from scipy.linalg import expm, sinm, cosm
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+
+
+
+
+# ==========================================
+# (b) l Hamiltoniano del modelo de Ising transversal en función de (N, J, B)
+# ==========================================
+def construir_hamiltoniano_ising(N, J, B):
+
+    I = np.array([[1, 0], [0, 1]]) #Matriz identidad
+    sigma_x = np.array([[0, 1], [1, 0]]) #Matriz de pauli x
+    sigma_z = np.array([[1, 0], [0, -1]]) #Matriz de pauli z
+    
+    # --- Inicialización del Hamiltoniano ---
+    dim = 2**N
+    H = np.zeros((dim, dim)) # Iniciamos un hamiltoniano vacio 
+    
+    # --- Sumatoria de Interacción J ---
+    for i in range(N - 1):
+        operador_j = 1 #Para iniciar o elemento neutro
+        for j in range(N):
+            if j == i or j == i + 1:
+                operador_j = np.kron(operador_j, sigma_x) #Producto de kronecker
+            else:
+                operador_j = np.kron(operador_j, I)
+        
+        H += J * operador_j
+        
+    # --- Sumatoria del Campo Transversal B ---
+    for i in range(N):
+        operador_b = 1 #Para iniciar o elemento neutro
+        for j in range(N):
+            if j == i:
+                operador_b = np.kron(operador_b, sigma_z)
+            else:
+                operador_b = np.kron(operador_b, I)
+                
+        H += B * operador_b
+        
+    return H
+
+# ==========================================
+# (c) scipy.linalg.expm
+# ==========================================
+def Estado_total_i(N):
+    Estado_i = np.array([0, 1])
+
+    Estado_total = Estado_i
+
+
+    for _ in range(N - 1):
+        Estado_total = np.kron(Estado_total, Estado_i)
+
+    print(f"La dimensión del estado total es: {Estado_total.shape}")
+    return Estado_total
+
+
+def operador_evolucion(H,t_max,dt,h_bar):
+    termino_e=(-1j*H*dt)/h_bar
+    U=expm(termino_e)
+    return U
+
+N=4
+J=1
+h=1
+t_max=10.0
+dt=0.05
+tiempos=np.arange(0, t_max, dt)
+
+estado_ini = Estado_total_i(N) + 0j
+
+#Definimos los casos para B que piden
+casos_B = [0.01, 1.0, 10.0]
+
+etiquetas = ['B/J << 1 (Domina Interacción)', 'B/J = 1 (Punto Crítico)', 'B/J >> 1 (Domina Campo)']
+colores = ['blue', 'green', 'red']
+plt.figure(figsize=(10, 6))
+
+
+# Evaluamos cada régimen de B
+
+for B, etiqueta, color in zip(casos_B, etiquetas, colores):
+    
+    H = construir_hamiltoniano_ising(N, J, B)
+    U = operador_evolucion(H, t_max, dt, h)
+    estado_actual = np.copy(estado_ini)
+    probabilidades = []
+    
+    # Evolución temporal
+    for t in tiempos:
+        # Calculamos la amplitud de probabilidad: <Psi(0)|Psi(t)>
+        # np.vdot conjuga automáticamente el primer vector (estado_ini)
+        amplitud = np.vdot(estado_ini, estado_actual)
+        
+        # La probabilidad es el módulo al cuadrado de la amplitud
+        prob = np.abs(amplitud)**2
+        probabilidades.append(prob)
+        
+        # Avanzamos un dt hacia el futuro
+        estado_actual = U @ estado_actual
+        
+    # Graficamos la curva de probabilidad para este valor de B
+    plt.plot(tiempos, probabilidades, label=etiqueta, color=color)
+
+plt.title(f"Probabilidad de retorno al estado inicial ($N={N}$ espines)")
+plt.xlabel("Tiempo $t$")
+plt.ylabel("$p(t) = |\\langle\\Psi(0)|\\Psi(t)\\rangle|^2$")
+plt.ylim(0, 1.05)
+plt.legend()
+plt.grid(True, alpha=0.6)
+plt.show()
+
+# ==========================================
+# (d) Medir el tiempo
+# ==========================================
+
+N_valores=np.array([4,5,6,7,8])
+
+Tiempos_promedios_hamiltoniano=[]
+Tiempos_promedios_diagonalizar=[]
+promedio=20
+for N_val in N_valores:
+
+    
+    muestras_hamiltoniano = np.zeros(promedio)
+    muestras_diagonal = np.zeros(promedio)
+    
+    for i in range(promedio):
+        # Medir tiempo de construir el hamiltoniano
+        inicio_hamiltoniano = time.perf_counter() 
+        H=construir_hamiltoniano_ising(N_val, J, B)
+        muestras_hamiltoniano[i] = time.perf_counter() - inicio_hamiltoniano
+        
+       
+        # Medir tiempo de diagonalizar
+        inicio_diagonalizacion=time.perf_counter() 
+        # np.linalg.eigh devuelve los valores propios y vectores propios de matrices Hermíticas
+        valores_propios, vectores_propios = np.linalg.eigh(H)
+        # La matriz P está formada por los vectores propios en las columnas
+        P = vectores_propios
+        # La matriz D es una matriz diagonal que contiene los valores propios
+        D = np.diag(valores_propios)     
+        muestras_diagonal[i]=time.perf_counter() - inicio_diagonalizacion
+        
+        
+
+    # Calculamos los promedios de un valor de N específico
+    promedio_H = np.mean(muestras_hamiltoniano)
+    promedio_D = np.mean(muestras_diagonal)
+    
+    Tiempos_promedios_hamiltoniano.append(promedio_H)
+    Tiempos_promedios_diagonalizar.append(promedio_D)
+    
+    # Calculamos el tiempo total de este N y lo imprimimos
+    tiempo_total_N = promedio_H + promedio_D
+    print(f"Medición para N = {N_val} completada. Tiempo total: {tiempo_total_N:.4f} segundos")
+
+# ==========================================
+# e) Graficar
+# ==========================================
+# Convertimos a arreglos de numpy
+tiempos_H_promedio = np.array(Tiempos_promedios_hamiltoniano)
+tiempos_D_promedio = np.array(Tiempos_promedios_diagonalizar)
+tiempos_totales = tiempos_H_promedio + tiempos_D_promedio
+
+
+plt.figure(figsize=(10, 5))
+#plt.plot(N_valores, tiempos_H_promedio, 'o-', label='Tiempo construcción de hamiltoniano', color='blue')
+#plt.plot(N_valores, tiempos_D_promedio, 's-', label='Tiempo de diagonalizar la matriz', color='red')
+plt.plot(N_valores, tiempos_D_promedio, 's-', label='Tiempo de construir y diagonalizar el hamiltoniano', color='red')
+plt.title("Tiempos de Ejecución")
+plt.xlabel("Número de espines (N)")
+plt.ylabel("Tiempo de ejecución promedio [s]")
+plt.grid(True)
+plt.legend()
+plt.show()
+
+
+# ==========================================
+# (f) y (g) Estimación de tiempos para N grandes
+# ==========================================
+
+N_objetivos = [20, 50, 100]
+
+# Usamos como referencia la medición más alta (N=8) para mayor precisión,
+N_ref = N_valores[-1] 
+T_ref = tiempos_totales[-1]
+
+# Edad del universo en segundos
+edad_universo_s = 4.3e17 # 
+segundos_por_año = 365.25 * 24 * 3600
+
+print(f"\n{'N':>5} | {'Tiempo Estimado (s)':>20} | {'En Años':>20} | {'vs Edad Universo':>20}")
+print("-" * 75)
+
+for N_obj in N_objetivos:
+    # Aplicamos la fórmula: T_est = T_ref * 2^(3 * (N_obj - N_ref))
+    exponente = 3 * (N_obj - N_ref)
+    tiempo_estimado_s = T_ref * (2.0**exponente)
+    
+    tiempo_en_años = tiempo_estimado_s / segundos_por_año
+    relacion_universo = tiempo_estimado_s / edad_universo_s
+    
+    print(f"{N_obj:5d} | {tiempo_estimado_s:20.2e} | {tiempo_en_años:20.2e} | {relacion_universo:20.2e}x")
