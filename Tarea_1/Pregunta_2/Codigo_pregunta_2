@@ -1,0 +1,187 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+
+# Definimos los parámetros de la señal
+N = 2**8       # Número de muestras 
+fs = 100          # Frecuencia de muestreo 
+tn = np.linspace(0, (N-1)/fs, N)  # Vector de tiempos tn
+
+
+
+# ==========================================
+# (a) Función que genera una señal compuesta por dos frecuencias
+# ==========================================
+def senal(t,f1,f2):
+    xn=np.sin(2*np.pi*f1*t)+0.5*np.sin(2*np.pi*f2*t)
+    return xn
+
+# ==========================================
+# (b)  transformada discreta de Fourier utilizando dos ciclos for.
+# ==========================================
+def transformada_discreta_fourier(señal):
+    N = len(señal)
+    Xk = np.zeros(N, dtype=complex) #Vector vacio
+    
+    for k in range(N):
+        Fourier = 0
+        for n in range(N):
+            expo = np.exp(-2j * np.pi * k * n / N)
+            Fourier += señal[n] * expo
+        Xk[k] = Fourier
+        
+    return Xk
+# Definimos las frecuencias
+f1 = 10 
+f2 = 30
+
+señal=senal(tn, f1, f2)
+resultado_dft = transformada_discreta_fourier(señal)
+
+
+# ==========================================
+# (d)  Utilizamos el comando numpy.fft.fft.
+# ==========================================
+Fourier_biblio=np.fft.fft(señal)
+
+
+# ==========================================
+# (c)  Grafico del espectro
+# ==========================================
+#--------------------Grafico de la señal a partir de dos frecuencias--------------------
+plt.figure(figsize=(10, 4))
+plt.plot(tn, señal)
+plt.title(f"Señal generada desde función ({f1} Hz + {f2} Hz)")
+plt.xlabel("Tiempo [s]")
+plt.ylabel("Amplitud")
+plt.grid(True)
+plt.show()
+
+#--------------------Grafico de tranformada de forurier (Xk vs f)--------------------
+
+magnitud = np.abs(resultado_dft)
+# Creamos el eje de frecuencias en Hz
+frecuencias = np.arange(N) * (fs / N)
+
+plt.figure(figsize=(10, 4))
+plt.plot(frecuencias[:N//2], magnitud[:N//2]) # Usamos .stem para espectro discreto
+plt.title("Espectro de Magnitud $|X_k|$")
+plt.xlabel("Frecuencia [Hz]")
+plt.ylabel("Magnitud")
+plt.grid(True)
+plt.show()
+
+
+#--------------------Grafico de tranformada de forurier utilizando numpy.fft.fft--------------------
+magnitud_biblio = np.abs(Fourier_biblio)
+
+plt.figure(figsize=(10, 4))
+plt.plot(frecuencias[:N//2], magnitud_biblio[:N//2], color='red', label='FFT de NumPy')
+plt.title("Espectro calculado con numpy.fft.fft")
+plt.xlabel("Frecuencia [Hz]")
+plt.ylabel("Magnitud")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+#--------------------Graficamos los tiempos de  ejecución utilizando time--------------------
+    
+    
+# ==========================================
+# (e) Comparación de tiempos de ejecución
+# ==========================================
+M = 15 # Mediciones por realizar
+N_valores = np.array([10**2, 10**3, 10**4])
+
+tiempos_DFT_promedio = []
+tiempos_FFT_promedio = []
+
+print("Iniciando medición de tiempos...")
+
+for N_val in N_valores:
+    t_test = np.linspace(0, 1, N_val)
+    x_test = senal(t_test, 10, 30)
+    
+    muestras_dft = np.zeros(M)
+    muestras_fft = np.zeros(M)
+    
+    for i in range(M):
+        # Medir DFT Manual
+        inicio_dft = time.perf_counter()
+        transformada_discreta_fourier(x_test)
+        muestras_dft[i] = time.perf_counter() - inicio_dft
+        
+        # Medir FFT de NumPy
+        inicio_fft = time.perf_counter()
+        np.fft.fft(x_test)
+        muestras_fft[i] = time.perf_counter() - inicio_fft
+    
+    tiempos_DFT_promedio.append(np.mean(muestras_dft))
+    tiempos_FFT_promedio.append(np.mean(muestras_fft))
+    print(f"Medición para N = {N_val} completada.")
+
+# Convertimos a arreglos de numpy para facilitar cálculos posteriores
+tiempos_DFT_promedio = np.array(tiempos_DFT_promedio)
+tiempos_FFT_promedio = np.array(tiempos_FFT_promedio)
+
+# ==========================================
+# (f) Gráfico del tiempo de ejecución en función de N
+# ==========================================
+plt.figure(figsize=(10, 5))
+plt.plot(N_valores, tiempos_DFT_promedio, 'o-', label='DFT Manual', color='blue')
+plt.plot(N_valores, tiempos_FFT_promedio, 's-', label='NumPy FFT', color='red')
+
+plt.title("Tiempos de Ejecución: DFT vs FFT (Escala Lineal)")
+plt.xlabel("Tamaño de la señal (N)")
+plt.ylabel("Tiempo de ejecución promedio [s]")
+plt.grid(True)
+plt.legend()
+plt.show()
+
+# ==========================================
+# (g) Gráfico log-log y estimación de exponentes
+# ==========================================
+
+# Calculamos los logaritmos en base 10 de nuestros datos
+log_N = np.log10(N_valores)
+log_T_DFT = np.log10(tiempos_DFT_promedio)
+log_T_FFT = np.log10(tiempos_FFT_promedio)
+
+
+exponente_dft, intercepto_dft = np.polyfit(log_N, log_T_DFT, 1)
+exponente_fft, intercepto_fft = np.polyfit(log_N, log_T_FFT, 1)
+
+print("-" * 50)
+print(f"Exponente de escalamiento estimado DFT: {exponente_dft:.2f} (Teórico: ~2.0)")
+print(f"Exponente de escalamiento estimado FFT: {exponente_fft:.2f} (Teórico: ~1.0)")
+print("-" * 50)
+
+plt.figure(figsize=(10, 5))
+plt.loglog(N_valores, tiempos_DFT_promedio, 'o-', label=f'DFT Manual ($\\alpha \\approx$ {exponente_dft:.2f})', color='blue')
+plt.loglog(N_valores, tiempos_FFT_promedio, 's-', label=f'NumPy FFT ($\\alpha \\approx$ {exponente_fft:.2f})', color='red')
+
+plt.title("Tiempos de Ejecución: DFT vs FFT (Escala Log-Log)")
+plt.xlabel("Tamaño de la señal (N) [Escala Log]")
+plt.ylabel("Tiempo de ejecución promedio [s] [Escala Log]")
+plt.grid(True, which="both", ls="-", alpha=0.5)
+plt.legend()
+plt.show()
+
+
+# ==========================================
+# (h) Determinar N donde FFT es 100 veces más rápida
+# ==========================================
+
+# Despejamos log_N a partir de la diferencia de las rectas de ajuste empírico
+log_N_100x = (2 - (intercepto_dft - intercepto_fft)) / (exponente_dft - exponente_fft)
+
+# Elevamos 10 a esa potencia para recuperar el valor real de N
+N_100x = 10**(log_N_100x)
+
+print("\n" + "=" * 50)
+print("--- (h) Análisis de Rendimiento Cruzado ---")
+print("En base al ajuste empírico de hardware:")
+print(f"La FFT se vuelve ~100 veces más rápida que la DFT manual")
+print(f"para un tamaño de señal aproximado de N = {int(N_100x)}")
+print("=" * 50 + "\n")
