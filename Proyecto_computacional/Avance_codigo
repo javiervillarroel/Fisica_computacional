@@ -1,239 +1,515 @@
 import numpy as np
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+from scipy.interpolate import griddata
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from collections import deque
-import matplotlib.cm as cm # Para degradados de color
-import matplotlib
 
+# ------------------- Geometria -------------------
 
+D = 0.02  # Diametro promedio de la aorta abdonminal en [m]
+# Parametros para la geometria
+L1 = 2.5 * D
+L2 = 5 * D
+D2 = 2.75 * D
+Lt = 11.25 * D
+D1 = 2 * D
 
-D=0.02 #m
-L1=2.5 *D
-L2=5*D
-D2=2.75*D
-Lt=11.25*D
-D1=2*D
-
-
-def radio_aorta(x_val): #Funcion a trozos que determina la geometria del problema
+#Dominio físico del aneurisma 
+def radio_aorta(x_val):
     if 0 <= x_val <= L1:
-        return D/2
-    
-    elif L1 <= x_val <= L1+L2:
-        aneurisma= ( ((D2-D)/4)*(1+np.sin(((2*np.pi*(x_val-L1))/L2)-(np.pi/2))) )+D/2
+        return D / 2
+    elif L1 <= x_val <= L1 + L2: # Parte del aneurisma
+        aneurisma = (((D2 - D) / 4) * (1 + np.sin(((2 * np.pi * (x_val - L1)) / L2) - (np.pi / 2)))) + D / 2
         return aneurisma
-    
     else:
-        return D/2
-    
-# Crear la malla 
-nx, ny = 100, 30
-x = np.linspace(0, Lt, nx)
+        return D / 2
+
+
+# ------------------- Mapeo de Coordenadas -------------------
+
+
+nx, ny = 100, 30 # División del dominio
+
+# Creamos una lista equiespaciada 
+x = np.linspace(0, Lt, nx) # Abarca la longitud
 xi = np.linspace(-1, 1, ny) # Coordenada normalizada de -1 a 1
 
-X = np.zeros((ny, nx))
-Y = np.zeros((ny, nx))
+dx = x[1] - x[0] # 2.27 mm
+dxi = xi[1] - xi[0] # 68.9 mm
 
-# geometría abstracta a una malla numérica real
-for i in range(nx): # bucle recorre el largo de la arteria (el eje x)
-    R_local = radio_aorta(x[i]) # Que tan ancha es la arteria en x
-    for j in range(ny):#Este bucle recorre la sección vertical en esa posición x específica
-        X[j, i] = x[i] #guarda la posición horizontal.
-        Y[j, i] = xi[j] * R_local # Estirar segun el radio
+#Creamos dos listas vacias
+X = np.zeros((ny, nx)) # Posición horizontal de cada nodo 
+Y = np.zeros((ny, nx)) # Posición vertical de cada nodo 
 
-#------------------- Mapeo de Derivadas ------------------- 
+# Generamos la malla física
+for i in range(nx): # Avanzamos a lo largo de la arteria, columna por columna
+    R_local = radio_aorta(x[i]) # Nos dice el radio exacto en i  R(x)
+    for j in range(ny):
+        X[j, i] = x[i] # Todos los puntos de una misma columna comparten la misma posición horizontal.
+        Y[j, i] = xi[j] * R_local # Multiplicamos xi por R. La malla se estira verticalmente dentro del aneurisma y se contrae en las zonas rectas
 
+# ------------------- Mapeo de Derivadas -------------------
 
-# Creamos el arreglo de radios para cada punto en x
-R_limite = np.array([radio_aorta(val) for val in x])
+R_limite = np.array([radio_aorta(val) for val in x]) # Arreglo (1D) que contiene el radio de la arteria R(x) en cada punto longitudinal
+dRdx = np.gradient(R_limite, dx)
+inv_R = 1.0 / R_limite[None, :]
+term_corr = - (xi[:, None] * dRdx) / R_limite
 
-# Calcular la derivada del radio respecto a x (pendiente de la pared)
-dRdx = np.gradient(R_limite, x)
+# ------------------- Parametros de Carreau -------------------
 
-# Calcular los factores de transformación para cada punto (i, j)
-# Estos factores "corrigen" las derivadas en el aneurisma
-inv_R = 1.0 / R_limite[None, :]  # Esto ayuda para la derivada respecto a 'y'
-term_corr = - (xi[:, None] * dRdx) / R_limite # Esto ayuda para la derivada respecto a 'x'
+mu_0 = 0.056
+mu_inf = 0.00345
+delta = 3.313
+n = 0.3568
+a = 2
+rho = 1050
 
-
-
-# Graficar la malla (Grilla)
-plt.figure(figsize=(12, 4))
-
-# Dibujar las líneas verticales
-for i in range(0, nx, 2): # Saltamos de 2 en 2 para que no sea una mancha negra
-    plt.plot(X[:, i], Y[:, i], color='black', linewidth=0.5)
-
-# Dibujar las líneas horizontales
-for j in range(ny):
-    plt.plot(X[j, :], Y[j, :], color='black', linewidth=0.5)
-
-plt.gca().set_aspect('equal')
-plt.title("Dominio Computacional: Malla Ajustada al Aneurisma")
-plt.xlabel("Largo (cm)")
-plt.ylabel("Radio (cm)")
-plt.show()
-
-
-
-
-#------------------- Definimos las ecuaciones que gobiernan el problema ------------------- 
-
-# Parámetros de Carreau (Viscosidad de la sangre)
-mu_0 = 0.056    # Pa.s
-mu_inf = 0.00345 # Pa.s
-delta = 3.313     # s
-n = 0.3568      # Adimensional
-a= 2            #Adimensional
-rho=1050   #kg/m^3
-
-def calcular_viscosidad(u, v, inv_R, term_corr):
-    #Aplicamos regla de la cadena a u(x,xi)
-    ui_xi= np.gradient(u, xi, axis=0)
-    uj_xi = np.gradient(v, xi, axis=0)
+#Calculo de la viscocidad dinámica de la sangre en cada punto del dominio
+def calcular_viscosidad(u, v, inv_R, term_corr, dx, dxi):
+    # Calulamos las derivadas espaciales de las velocidades u y v con respecto
+    # a la malla computacional normalizada. np.gradiente utiliza discretización de diferencias finitas centradas
+    ui_xi = np.gradient(u, dxi, axis=0)
     
-    ui_j_matriz = np.gradient(u, x, axis=1)
-    uj_i_matriz = np.gradient(v, x, axis=1)
-    
-    #Derivadas reales que ocuparemos
-    
+    uj_xi = np.gradient(v, dxi, axis=0)
+    ui_j_matriz = np.gradient(u, dx, axis=1)
+    uj_i_matriz = np.gradient(v, dx, axis=1)
+
+    # Utilizando la regla de la cadena transformamos las derivadas "rectangulares" a las derivadas físicas reales
     du_dy = ui_xi * inv_R
     dv_dy = uj_xi * inv_R
+
     du_dx = ui_j_matriz + term_corr * ui_xi
-    dv_dx = uj_i_matriz+ uj_xi * term_corr
+    dv_dx = uj_i_matriz + uj_xi * term_corr
     
-    #Calculamos Dij
-    Dxx = 0.5*(du_dx+du_dx)
-    Dyy = 0.5*(dv_dy+dv_dy)
+    # Componentes del tensor de tasa de deformación
+    # Este tensor mide cómo las capas de fluido se estiran y se deslizan unas sobre otras
+    Dxx = du_dx
+    Dyy = dv_dy
     Dxy = 0.5 * (du_dy + dv_dx)
-    Dyx= 0.5*(dv_dx+du_dy)
-    gamma_dot = np.sqrt(2*(Dxx**2 + Dyy**2 + Dxy**2 + Dyx**2))
-    gamma_dot = np.clip(gamma_dot, 1e-7, 1e5)# <--- Evitar ceros e infinitos
-    mu_gamma=(((1+ (delta*gamma_dot)**a )**((n-1)/a))*(mu_0-mu_inf)) + mu_inf
     
-    return mu_gamma 
+    # Calculamos la magnitud de la tasa de Corte
+    gamma_dot = np.sqrt(2 * (Dxx**2 + Dyy**2 + 2 * Dxy**2))
+    gamma_dot = np.clip(gamma_dot, 1e-7, 1e5) #Define los limites de la tasa de corte
+    mu_gamma = (((1 + (delta * gamma_dot)**a)**((n - 1) / a)) * (mu_0 - mu_inf)) + mu_inf # Calculamos segun el modelo de Carreau
+    return mu_gamma
 
 
-#------------------- Definimos el metodo a resolver, Chorin ------------------- 
+def construir_operador_2da_derivada(N, h):
+    # Construimos un esquema compacto (tipo Padé) para la segunda derivada. 
+    # El esquema tiene la forma implicita: LHS⋅f′′= RHS⋅f
+    
+    
+    # N es el número de puntos de la malla
+    # h es el espaciado
+    J = N - 1 # índice del último punto
+    h2 = h * h
 
-def paso_prediccion(u, v, mu, dt, rho, dx, dxi, inv_R, term_corr):
-    # --- A. Derivadas espaciales ---
+    # Coeficientes interiores para p=3,4,..J-3
+    al, be, ga = 0.63739437, 0.14766675, 0.00682344
+    a16, b16, c16 = -0.09172399, 1.70280915, 0.97268396
+    
+    # Coeficientes esquema 4to orden para p=2 y p=J-2
+    al_t, be_t = 0.40437617, 0.02221463
+    a17, b17 = 0.49797006, 1.35521152
+    
+    # Las matrices N x N inicializadas a cero 
+    LHS = np.zeros((N, N))
+    RHS = np.zeros((N, N))
+
+    # --- Bordes p=0 y p=J : 2da derivada lateral de 2do orden ---
+    LHS[0, 0] = 1.0 # Establecemos que el coeficiente de f''_0 es 1
+    RHS[0, 0], RHS[0, 1], RHS[0, 2], RHS[0, 3] = 2.0 / h2, -5.0 / h2, 4.0 / h2, -1.0 / h2 # Esquema asimétrico "hacia adelante" (FD). Evalúa los puntos 0, 1, 2 y 3 de la derecha para calcular la segunda derivada en la pared izquierda.
+    LHS[J, J] = 1.0 # Hace lo mismo pero en la pared derecha. Pero apunta hacia atras (BD)
+    RHS[J, J], RHS[J, J - 1], RHS[J, J - 2], RHS[J, J - 3] = 2.0 / h2, -5.0 / h2, 4.0 / h2, -1.0 / h2
+
+    # --- p=1 y p=J-1 : Pade clasico ---
+    # Utilizamos el esquema compacto tridiagonal clásico de cuarto orden
+    for p in (1, J - 1):
+        LHS[p, p - 1], LHS[p, p], LHS[p, p + 1] = 1.0 / 10, 1.0, 1.0 / 10
+        RHS[p, p - 1], RHS[p, p], RHS[p, p + 1] = 1.2 / h2, -2.4 / h2, 1.2 / h2
+
+    # --- p=2 y p=J-2 : esquema 4to orden ---
+    # Esquema pentadiagonal.
+    for p in (2, J - 2):
+        LHS[p, p - 2], LHS[p, p - 1], LHS[p, p], LHS[p, p + 1], LHS[p, p + 2] = be_t, al_t, 1.0, al_t, be_t
+        RHS[p, p - 2] = b17 / (4 * h2)
+        RHS[p, p - 1] = a17 / h2
+        RHS[p, p] = -2 * b17 / (4 * h2) - 2 * a17 / h2
+        RHS[p, p + 1] = a17 / h2
+        RHS[p, p + 2] = b17 / (4 * h2)
+
+    # --- p=3 ... J-3 : esquema compacto ---
+    # Esquema heptadiagonal
+    for p in range(3, J - 2):
+        LHS[p, p - 3], LHS[p, p - 2], LHS[p, p - 1] = ga, be, al
+        LHS[p, p] = 1.0
+        LHS[p, p + 1], LHS[p, p + 2], LHS[p, p + 3] = al, be, ga
+        RHS[p, p - 3] = c16 / (9 * h2)
+        RHS[p, p - 2] = b16 / (4 * h2)
+        RHS[p, p - 1] = a16 / h2
+        RHS[p, p] = -2 * c16 / (9 * h2) - 2 * b16 / (4 * h2) - 2 * a16 / h2
+        RHS[p, p + 1] = a16 / h2
+        RHS[p, p + 2] = b16 / (4 * h2)
+        RHS[p, p + 3] = c16 / (9 * h2)
+        
+        # np.linalg.solve() utiliza una libreria llamada LAPACK. Utiliza el metodo de descomposicion LU. A=LU y resuleve el sistema
+    return np.linalg.solve(LHS, RHS) # El return es f′′= Df
+
+
+# Operadores de 2da derivada. Al aplicarlos sobre f, calcula la segunda derivada
+M_x = construir_operador_2da_derivada(nx, dx)    # Construye el operador de segunda derivada para la dirección x.  El resultado M_x es una matriz nx × nx.
+M_xi = construir_operador_2da_derivada(ny, dxi)   # Lo mismo que el anteriorperov para la dirección xi
+
+#Definimos las siguientes funciones para que calculen la segunda derivada de un campo 2D f a traves de cada eje
+def d2_dx2_compacta(f):    # d2f/dx_m^2  (sobre eje x)
+    return f @ M_x.T
+
+# Para aplicar la derivada a las columnas (eje x) multiplicamos f por la transpuesta de M_x
+
+def d2_dxi2_compacta(f):   # d2f/dxi^2  (sobre eje xi)
+    return M_xi @ f # Aplicamos la derivada sobre las filas (eje xi)
+
+
+
+
+
+# ------------------- Derivadas UPWIND de 1er orden (adveccion) -------------------
+# Calculamos la primera derivada con un esquema upwind (primer orden)
+# np.empty_like(f) reserva un array del mismo tamaño sin inicializar
+def deriv_upwind_x(f, vel, h): # vel: campo de velocidad, f:campo 2D y h: Espaciado
+    df_b = np.empty_like(f); df_b[:, 1:] = (f[:, 1:] - f[:, :-1]) / h; df_b[:, 0] = (f[:, 1] - f[:, 0]) / h # Constuye la diferencia hacia atrás (backward)
+    df_f = np.empty_like(f); df_f[:, :-1] = (f[:, 1:] - f[:, :-1]) / h; df_f[:, -1] = (f[:, -1] - f[:, -2]) / h
+    # la columna 0 no tiene vecino a la izquierda, así que la diferencia hacia atrás no existe; se rellena con la única disponible ( adelante) como caso de borde.
+    return np.where(vel >= 0, df_b, df_f) # Construye la diferencia hacia adelante
+    #  Donde la velocidad es ≥ 0 toma df_b (hacia atrás), y donde es < 0 toma df_f (hacia adelante)
+    # Cada punto de la malla decide según su propio signo de velocidad, no hay una decisión global.
+
+def deriv_upwind_xi(f, vel, h): # Lo mismo pero para la componente xi
+    df_b = np.empty_like(f); df_b[1:, :] = (f[1:, :] - f[:-1, :]) / h; df_b[0, :] = (f[1, :] - f[0, :]) / h
+    df_f = np.empty_like(f); df_f[:-1, :] = (f[1:, :] - f[:-1, :]) / h; df_f[-1, :] = (f[-1, :] - f[-2, :]) / h
+    return np.where(vel >= 0, df_b, df_f)
+
+
+# ------------------- Velocidad intermedia (Chorin) -------------------
+def velocidad_intermedia(u, v, mu, dt, rho, dx, dxi, inv_R, term_corr):
+    # Velocidades contravariantes:
+    #   u d/dx_fis + v d/dy_fis = u d/dx_m + (u*term_corr + v*inv_R) d/dxi
+    U_cx = u
+    U_cxi = u * term_corr + v * inv_R
+
+    # ---- Adveccion: upwind de 1er orden (estabiliza) ----
+    adv_u = U_cx * deriv_upwind_x(u, U_cx, dx) + U_cxi * deriv_upwind_xi(u, U_cxi, dxi)
+    adv_v = U_cx * deriv_upwind_x(v, U_cx, dx) + U_cxi * deriv_upwind_xi(v, U_cxi, dxi)
+
+    # ---- Difusion: Laplaciano con 2da derivada COMPACTA ----
+    # d2/dy^2 = inv_R^2 * d2/dxi^2  (exacto por el mapeo y = xi*R(x))
+    d2u_dy2 = inv_R**2 * d2_dxi2_compacta(u)
+    d2v_dy2 = inv_R**2 * d2_dxi2_compacta(v)
+
+    # d2/dx^2 ~= d2/dx_m^2 (compacto) + correccion de mapeo (termino pequeno)
     du_dx_m = np.gradient(u, dx, axis=1)
-    du_dxi = np.gradient(u, dxi, axis=0)
-    du_dx = du_dx_m + term_corr * du_dxi
-    du_dy = inv_R * du_dxi
-
     dv_dx_m = np.gradient(v, dx, axis=1)
-    dv_dxi = np.gradient(v, dxi, axis=0)
-    dv_dx = dv_dx_m + term_corr * dv_dxi
-    dv_dy = inv_R * dv_dxi 
+    d2u_dx2 = d2_dx2_compacta(u) + term_corr * np.gradient(du_dx_m, dxi, axis=0)
+    d2v_dx2 = d2_dx2_compacta(v) + term_corr * np.gradient(dv_dx_m, dxi, axis=0)
 
-    # --- Advección ---
-    adv_u = u * du_dx + v * du_dy
-    adv_v = u * dv_dx + v * dv_dy
-
-    # --- Términos Viscosos ---
-    tau_xx = 2 * mu * du_dx
-    tau_yy = 2 * mu * dv_dy
-    tau_xy = mu * (du_dy + dv_dx)
-
-    dtau_xx_dx = np.gradient(tau_xx, dx, axis=1) + term_corr * np.gradient(tau_xx, dxi, axis=0)
-    dtau_xy_dy = inv_R * np.gradient(tau_xy, dxi, axis=0)
-    dif_u = (dtau_xx_dx + dtau_xy_dy) / rho
-
-    dtau_xy_dx = np.gradient(tau_xy, dx, axis=1) + term_corr * np.gradient(tau_xy, dxi, axis=0)
-    dtau_yy_dy = inv_R * np.gradient(tau_yy, dxi, axis=0)
-    dif_v = (dtau_xy_dx + dtau_yy_dy) / rho
+    dif_u = mu * (d2u_dx2 + d2u_dy2) / rho
+    dif_v = mu * (d2v_dx2 + d2v_dy2) / rho
 
     u_star = u + dt * (-adv_u + dif_u)
     v_star = v + dt * (-adv_v + dif_v)
+
+    u_star[0, :], u_star[-1, :] = 0, 0
+    v_star[0, :], v_star[-1, :] = 0, 0
     return u_star, v_star
 
-def resolver_poisson_presion(u_star, v_star, dt, rho, dx, dxi, inv_R, term_corr, p_old):
-    du_dx = np.gradient(u_star, dx, axis=1) + term_corr * np.gradient(u_star, dxi, axis=0)
-    dv_dy = inv_R * np.gradient(v_star, dxi, axis=0)
-    rhs = (rho / dt) * (du_dx + dv_dy)
-    
-    dy_matriz = (1.0 / inv_R) * dxi
-    idx = 1.0 / dx**2
-    idy_fila = 1.0 / dy_matriz**2
-    
-    idy = np.tile(idy_fila, (ny, 1)) 
-    central = np.tile(1.0 / (2 * (idx + idy_fila)), (ny, 1))
-    
-    p = p_old.copy()
-    for _ in range(70): # Subimos a 60 para mayor estabilidad
-        p_new = p.copy()
-        term_x = idx * (p[1:-1, 2:] + p[1:-1, :-2])
-        term_y = idy[1:-1, 1:-1] * (p[2:, 1:-1] + p[:-2, 1:-1])
-        p_new[1:-1, 1:-1] = central[1:-1, 1:-1] * (term_x + term_y - rhs[1:-1, 1:-1])
-        
-        # Bordes
-        p_new[0, :] = p_new[1, :]
-        p_new[-1, :] = p_new[-2, :]
-        p_new[:, 0] = p_new[:, 1]
-        p_new[:, -1] = 0
-        p = p_new
-    return p
 
+# ------------------- Poisson DIRECTO con Laplaciano compacto -------------------
+# Se ensambla L (Laplaciano discreto) usando las 2da derivadas compactas con sus condiciones de borde
+# y devuelve su factorización LU
+def construir_sistema_poisson(M_x, M_xi, inv_R):
+    
+    I_ny = sp.identity(ny, format='csr')   # Matriz identidad de tamaño ny en formato CSR
+    I_nx = sp.identity(nx, format='csr')   # Matriz identidad de tamaño nx en CSR
+    
+    
+    # Necesitamos aplanar en un solo vector 1D la malla 2D. El prodcuto kronecker toma los operadores
+    # de derivadas 1D y los expandimos a las dimensiones correctas para operar sobre la malla aplanada.
+    A_xx = sp.kron(I_ny, sp.csr_matrix(M_x))                  # d2/dx_m^2
+    A_xixi = sp.kron(sp.csr_matrix(M_xi), I_nx)               # d2/dxi^2
+    D_mat = sp.diags(np.tile((inv_R.ravel())**2, ny))         # Matriz diagonal con 1/R^2(x)
+    L = (A_xx + D_mat @ A_xixi).tolil()                       # Suma las derivadas horizontales y verticales para formar el Laplaciano físico total.
+    # .tolil() convierte la matriz a un formato de lista para poder modificar sus filas rápidamente en el siguiente paso.
+    
+    def idx(j, i): # convierte una coordenada 2D al índice 1D 
+        return j * nx + i
+
+    # --- Condiciones de borde ---
+    # Paredes: Neumann dp/dxi = 0  ->  p[0,i]=p[1,i] , p[ny-1,i]=p[ny-2,i]
+    for i in range(nx):
+        r = idx(0, i);    L.rows[r] = [idx(0, i),    idx(1, i)];    L.data[r] = [1.0, -1.0]
+        r = idx(ny - 1, i); L.rows[r] = [idx(ny - 1, i), idx(ny - 2, i)]; L.data[r] = [1.0, -1.0]
+    # Entrada: Neumann dp/dx = 0  ->  p[j,0]=p[j,1]
+    for j in range(ny):
+        r = idx(j, 0); L.rows[r] = [idx(j, 0), idx(j, 1)]; L.data[r] = [1.0, -1.0]
+    # Salida: Dirichlet p = 0  (ancla la presion)
+    for j in range(ny):
+        r = idx(j, nx - 1); L.rows[r] = [idx(j, nx - 1)]; L.data[r] = [1.0]
+
+    return spla.splu(sp.csc_matrix(L))
+
+# identificamos donde estan los borde. Marca como True todos los nodos de borde 
+mascara_borde = np.zeros((ny, nx), dtype=bool)
+mascara_borde[0, :] = mascara_borde[-1, :] = True
+mascara_borde[:, 0] = mascara_borde[:, -1] = True
+
+# Ejecuta la construcción y factorización una vez, al inicializar, y guarda el objeto LU 
+lu_poisson = construir_sistema_poisson(M_x, M_xi, inv_R)
+
+# Resuelve la ecuación de presión a partir de la velocidad intermedia
+def resolver_poisson_directo(u_star, v_star, dt, rho, dx, dxi, inv_R, term_corr): 
+    du_dx = np.gradient(u_star, dx, axis=1) + term_corr * np.gradient(u_star, dxi, axis=0) # Usamos diferencias centradas con paso dx sobre el eje 1, añadimos el termino correctivo del dominio computacional.
+    dv_dy = inv_R * np.gradient(v_star, dxi, axis=0)
+    rhs = (rho / dt) * (du_dx + dv_dy)  # Lado derecho de Poisson
+    rhs[mascara_borde] = 0.0 # Anula el RHS en los bordes
+    p_flat = lu_poisson.solve(rhs.ravel()) #Resuelve  Lp=rhs usando la LU ya factorizada 
+    return p_flat.reshape(ny, nx) # Devuelve la presión en forma 2D
+
+
+# ------------------- Paso de correccion -------------------
 def paso_correccion(u_star, v_star, p, dt, rho, dx, dxi, inv_R, term_corr):
-    # Gradiente de presión real
+    # Calculamos el gradiente de presión con el mismo tratamiento métrico que la divergencia 
     dp_dx = np.gradient(p, dx, axis=1) + term_corr * np.gradient(p, dxi, axis=0)
     dp_dy = inv_R * np.gradient(p, dxi, axis=0)
 
-    # Actualización final
     u_final = u_star - (dt / rho) * dp_dx
     v_final = v_star - (dt / rho) * dp_dy
-
     return u_final, v_final
 
 
 
-#------------------- Condiciones iniciales ------------------- 
 
-# 1. Creamos las matrices base
-u = np.zeros((ny, nx))
-v = np.zeros((ny, nx))
-p = np.zeros((ny, nx))
+# =============================================================================
+#  Ciclo principal
+# =============================================================================
 
-# Forzamos la entrada desde el primer instante 
-# Aunque el resto sea 0, la sangre ya está presionando en x=0
-u[:, 0] = 2.0 * (1 - xi**2)
+# Utilizamos Euler explícito de primer orden
 
-# Parámetros de control
-dt = 0.00001     # Paso de tiempo muy pequeño para evitar que "explote"
-t = 0
-t_final = 1.0   # Tiempo total de simulación
-iteracion = 0
+velocidades_prueba = [0.3, 0.8, 1.2, 1.6] # Distintas velocidades maxima de prueba
+t_final = 0.21250 # Tiempo final de estudio
+intervalo_print = 200 # Cada cuantas iteraciones se imprime el estado
 
-while t < t_final:
-    u_ant, v_ant, p_ant = u.copy(), v.copy(), p.copy()
+# Acumuladores de WSS para el grafico comparativo final
+historial_wss_superior = {}
+historial_wss_inferior = {}
+
+for v_max in velocidades_prueba:
+
+    #Calculos fisicos
+    v_media = (2.0 / 3.0) * v_max          # perfil parabolico 2D: V_media = (2/3) V_max
+    area_seccion = np.pi * (D / 2)**2
+    caudal_m3s = v_media * area_seccion     # Q = V_media * Area  [m3/s]
+    re_nominal = (rho * v_media * D) / mu_inf # Utilizamos el valor de la viscocidad inf para calcular el numero de Reynolds
+
+    print("\n" + "=" * 64)
+    print(f"INICIANDO SIMULACION - CASO: V_max = {v_max} m/s")
+    print(f"--> Flow Rate Estimado: {caudal_m3s:.2e} m3/s")
+    print(f"--> Reynolds Nominal:   {re_nominal:.0f}")
+    print("=" * 64)
+
+    # Inicialización. El fluido esta en reposo.
+    u = np.zeros((ny, nx))
+    v = np.zeros((ny, nx))
+    p = np.zeros((ny, nx))
+    u_star = np.zeros((ny, nx))
+    t = 0
+    iteracion = 0
+
+    # 3. Ciclo temporal 
+    while t < t_final:
+        u_ant, v_ant = u.copy(), v.copy()
+
+        # La velocidad de entrada crece linealmente de 0 a v_max durante los primeros 0.1 s
+        v_entrada = v_max * min(1.0, t / 0.1)      # rampa de aceleracion suave
+        u[:, 0] = v_entrada * (1 - xi**2) # Perfil parabólico de entrada
+        v[:, 0] = 0
+
+        mu = calcular_viscosidad(u_ant, v_ant, inv_R, term_corr, dx, dxi) # Viscosidad local en cada nodo.
+        
+        # Cantidades para los límites de estabilidad
+        u_max_local = max(np.max(np.abs(u_ant)), 1e-4)
+        v_max_local = max(np.max(np.abs(v_ant)), 1e-4)
+        mu_max = np.max(mu)
+        dy_min = np.min((1.0 / inv_R) * dxi) # Tamaño físico de celda más pequeña
+
+        # Como el esquema es explícito, hay dos restricciones
+        dt_cfl = 1.0 / (u_max_local / dx + v_max_local / dy_min) # CFL advectiva
+        dt_dif = (rho * (dx * dy_min)**2) / (2.0 * mu_max * (dx**2 + dy_min**2)) # difusiva/viscosa 
+        dt = 0.30 * min(dt_cfl, dt_dif)            # factor de seguridad
+        dt = min(dt, 0.00005) # techo absoluto 
+
+        u_star, v_star = velocidad_intermedia(u_ant, v_ant, mu, dt, rho, dx, dxi, inv_R, term_corr)
+        p = resolver_poisson_directo(u_star, v_star, dt, rho, dx, dxi, inv_R, term_corr)
+        u, v = paso_correccion(u_star, v_star, p, dt, rho, dx, dxi, inv_R, term_corr)
+
+        # Reaplicamos las condiciones de borde por si la proyeccion las altero 
+        u[:, 0] = v_entrada * (1 - xi**2)
+        v[:, 0] = 0
+        u[0, :], u[-1, :] = 0, 0
+        v[0, :], v[-1, :] = 0, 0
+        u[:, -1], v[:, -1] = u[:, -2], v[:, -2]
+
+        # Red de seguridad: limita un eventual runaway antes de que sea NaN
+        lim = 8.0 * max(v_max, 0.1)
+        u = np.clip(u, -lim, lim)
+        v = np.clip(v, -lim, lim)
+
+        if np.isnan(u).any() or np.isnan(v).any():
+            print(f"  ¡La simulacion exploto en la iteracion {iteracion}!")
+            break
+
+        t += dt
+        iteracion += 1
+
+        if iteracion % intervalo_print == 0:
+            print(f"  it={iteracion:6d} | t={t:.5f}s | dt={dt:.2e} | "
+                  f"|u*|max={np.max(np.abs(u_star)):.4f} | "
+                  f"p:[{np.min(p):.2e},{np.max(p):.2e}] | "
+                  f"|u|max={np.max(np.abs(u)):.4f} | |v|max={np.max(np.abs(v)):.4f}")
+
+    print("  Simulacion del caso completada. Post-procesando (WSS + streamlines + viscosidad)...")
+
+    # -------------------------------------------------------------------------
+    # WSS al finalizar t_final para este caudal (usa 'mu' de la ultima iteracion del ciclo).
+    # -------------------------------------------------------------------------
+    du_dxi_final = np.gradient(u, dxi, axis=0)
+    du_dy_final = inv_R * du_dxi_final
+
+    wss_inferior = np.abs(mu[0, :] * du_dy_final[0, :])
+    wss_superior = np.abs(mu[-1, :] * du_dy_final[-1, :])
+
+    etiqueta = f"Q = {caudal_m3s:.2e} m3/s (Re: {re_nominal:.0f})"
+    historial_wss_superior[etiqueta] = wss_superior
+    historial_wss_inferior[etiqueta] = wss_inferior
+
+
+    # -------------------------------------------------------------------------
+    # Malla regular para interpolacion 
+    # -------------------------------------------------------------------------
+    x_lin = np.linspace(0, Lt, 200)
+    y_lin = np.linspace(np.min(Y), np.max(Y), 100)
+    X_reg, Y_reg = np.meshgrid(x_lin, y_lin) # Armamos las matrices de coordenadas
+    puntos = np.column_stack((X.flatten(), Y.flatten()))
+
+    # ----------------------- Lineas de corriente -----------------------
     
-    # Iniciar el fluido lentamente para que no explote la simulacion
-    v_entrada = 0.5 * min(1.0, t / 0.05)
-    u[:, 0] = v_entrada * (1 - xi**2)
-    v[:, 0] = 0
+    print("  Generando grafico de lineas de corriente...")
+    # Interpolamos los valores de velocidad (que están en puntos) sobre la malla regular, con interpolación cúbica
+    u_reg = griddata(puntos, u.flatten(), (X_reg, Y_reg), method='cubic', fill_value=0)
+    v_reg = griddata(puntos, v.flatten(), (X_reg, Y_reg), method='cubic', fill_value=0)
+    velocidad_magnitud = np.sqrt(u_reg**2 + v_reg**2) # Calculamos la magnitud de la velocidad
 
-    #  Viscosidad
-    mu = calcular_viscosidad(u_ant, v_ant, inv_R, term_corr)
-    dx, dxi = x[1] - x[0], xi[1] - xi[0]
-    
-    # Chorin
-    u_star, v_star = paso_prediccion(u_ant, v_ant, mu, dt, rho, dx, dxi, inv_R, term_corr)
-    p = resolver_poisson_presion(u_star, v_star, dt, rho, dx, dxi, inv_R, term_corr, p_ant)
-    u, v = paso_correccion(u_star, v_star, p, dt, rho, dx, dxi, inv_R, term_corr)
-    
-    # Condiciones de borde
-    u[:, 0] = v_entrada * (1 - xi**2)
-    v[:, 0] = 0
-    u[0, :], u[-1, :] = 0, 0
-    v[0, :], v[-1, :] = 0, 0
-    u[:, -1], v[:, -1] = u[:, -2], v[:, -2] # Salida libre
+    fig, ax = plt.subplots(figsize=(13, 5), facecolor='white')
+    #  Las líneas de corriente son una curva tangente en todo punto al campo de velocidad; 
+    strm = ax.streamplot(X_reg, Y_reg, u_reg, v_reg, color=velocidad_magnitud, cmap='jet',
+                         linewidth=1.5, density=3.5, arrowsize=1.2)
 
-    t += dt
-    iteracion += 1
-    if iteracion % 100 == 0:
-        print(f"Tiempo: {t:.5f} s | V_in: {v_entrada:.2f}") #para verificar donde explota la simulacion
+    ax.plot(X[0, :], Y[0, :], color='black', linewidth=2.5)
+    ax.plot(X[-1, :], Y[-1, :], color='black', linewidth=2.5)
+
+    ax.fill_between(x, R_limite, 0.04, color='white', zorder=10)
+    ax.fill_between(x, -R_limite, -0.04, color='white', zorder=10)
+
+    cbar = fig.colorbar(strm.lines, ax=ax, orientation='horizontal', pad=0.15, fraction=0.04)
+    cbar.set_label('Magnitud de Velocidad (m/s)', fontsize=11, fontweight='bold')
+
+    ax.axis('off')
+    ax.axis('equal')
+    ax.set_ylim(-0.035, 0.035)
+    """
+    titulo = (f"Lineas de Corriente en Aneurisma a t = {t_final:.4f} s\n"
+              f"Flow Rate: {caudal_m3s:.2e} m$^3$/s  |  Re: {re_nominal:.0f}  |  V_max: {v_max} m/s")
+    plt.title(titulo, fontsize=14, fontweight='bold', pad=15)
+    """
+    nombre_archivo = f"Streamlines_FlowRate_{caudal_m3s:.2e}_m3s.png"
+    plt.savefig(nombre_archivo, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"--> Grafico guardado: {nombre_archivo}")
+
+
+    # -----------------------  Mapa de viscosidad (Carreau) -----------------------
+    # MIismo campo final, misma malla. Recomputa mu_final de (u, v) finales,
+
+    print("  Generando mapa de viscosidad (Carreau)...")
+
+    mu_final = calcular_viscosidad(u, v, inv_R, term_corr, dx, dxi)
+    mu_reg = griddata(puntos, mu_final.flatten(), (X_reg, Y_reg), method='cubic')
+
+    fig, ax = plt.subplots(figsize=(13, 5), facecolor='white')
+
+    # Escala fija [mu_inf, mu_0] para que
+    # los casos sean comparables entre si.
+    niveles = np.linspace(mu_inf, mu_0, 80)
+    cf = ax.contourf(X_reg, Y_reg, mu_reg, levels=niveles, cmap='jet', extend='both')
+
+    ax.plot(X[0, :], Y[0, :], color='black', linewidth=2.5)
+    ax.plot(X[-1, :], Y[-1, :], color='black', linewidth=2.5)
+
+    ax.fill_between(x, R_limite, 0.04, color='white', zorder=10)
+    ax.fill_between(x, -R_limite, -0.04, color='white', zorder=10)
+
+    cbar = fig.colorbar(cf, ax=ax, orientation='horizontal', pad=0.15, fraction=0.04,
+                        ticks=np.linspace(mu_inf, mu_0, 6))
+    cbar.ax.set_xticklabels([f"{val:.3f}" for val in np.linspace(mu_inf, mu_0, 6)])
+    cbar.set_label('Viscosidad $\\mu$ (Pa$\\cdot$s)', fontsize=11, fontweight='bold')
+
+    ax.axis('off')
+    ax.axis('equal')
+    ax.set_ylim(-0.035, 0.035)
+
+    titulo_mu = (f"Mapa de Viscosidad (Carreau) en Aneurisma a t = {t_final:.4f} s\n"
+                 f"Flow Rate: {caudal_m3s:.2e} m$^3$/s  |  Re: {re_nominal:.0f}  |  V_max: {v_max} m/s")
+    plt.title(titulo_mu, fontsize=14, fontweight='bold', pad=15)
+
+    nombre_visc = f"Viscosidad_FlowRate_{caudal_m3s:.2e}_m3s.png"
+    plt.savefig(nombre_visc, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"--> Grafico guardado: {nombre_visc}\n")
+
+
+# =============================================================================
+#                  GRAFICO FINAL COMPARATIVO DE WSS
+# =============================================================================
+print("\nGenerando grafico comparativo de WSS...")
+
+fig, ax = plt.subplots(figsize=(12, 6), facecolor='white')
+colores = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+for idx, (etiqueta, wss_sup) in enumerate(historial_wss_superior.items()):
+    ax.plot(x, wss_sup, label=f'{etiqueta}', color=colores[idx % len(colores)], linewidth=2.2)
+
+ax.axvspan(L1, L1 + L2, color='gray', alpha=0.15, label='Zona del Saco Aneurismatico')
+"""
+ax.set_title("Comparacion de Wall Shear Stress (Pared del Aneurisma) a distintos Caudales",
+             fontsize=15, fontweight='bold', pad=15)
+"""
+ax.set_xlabel("Largo de la arteria $x$ (m)", fontsize=13)
+ax.set_ylabel("Wall Shear Stress $\\tau_w$ (Pa)", fontsize=13)
+
+todos_los_wss = np.concatenate(list(historial_wss_superior.values()))
+limite_y = np.percentile(todos_los_wss, 98) * 1.15
+ax.set_ylim(bottom=0, top=4.6)
+
+ax.grid(True, linestyle='--', alpha=0.6)
+ax.legend(loc='best', fontsize=11, framealpha=0.9)
+
+plt.tight_layout()
+
+nombre_grafico_wss = "Comparativa_WSS_Caudales_Aneurisma.png"
+plt.savefig(nombre_grafico_wss, dpi=200)
+plt.close()
+
+print(f"--> Grafico de comparacion de WSS guardado como '{nombre_grafico_wss}'")
+
 
 
 
