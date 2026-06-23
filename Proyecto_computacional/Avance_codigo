@@ -3,6 +3,9 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 from scipy.interpolate import griddata
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 
 # ------------------- Geometria -------------------
 
@@ -160,34 +163,100 @@ def construir_operador_2da_derivada(N, h):
 M_x = construir_operador_2da_derivada(nx, dx)    # Construye el operador de segunda derivada para la dirección x.  El resultado M_x es una matriz nx × nx.
 M_xi = construir_operador_2da_derivada(ny, dxi)   # Lo mismo que el anteriorperov para la dirección xi
 
+
+# ------------------- Operador de 1ra derivada compacta Pade 6to orden -------------------
+# Esquema centrado de alto orden para la adveccion
+# Forma implicita: LHS * f' = RHS * f
+def construir_operador_1ra_derivada(N, h):
+    # N es el numero de puntos de la malla; h es el espaciado
+    LHS = np.zeros((N, N))
+    RHS = np.zeros((N, N))
+
+    # --- Interior (i = 2 ... N-3): Pade 6to orden ---
+    for i in range(2, N - 2):
+        LHS[i, i - 1] = 1.0 / 3.0
+        LHS[i, i]     = 1.0
+        LHS[i, i + 1] = 1.0 / 3.0
+        RHS[i, i - 1] = -14.0 / (9.0 * 2.0 * h)
+        RHS[i, i + 1] =  14.0 / (9.0 * 2.0 * h)
+        RHS[i, i - 2] =  -1.0 / (9.0 * 4.0 * h)
+        RHS[i, i + 2] =   1.0 / (9.0 * 4.0 * h)
+
+    # --- p=1 y p=N-2: Pade clasico 4to orden (tridiagonal) ---
+    for i in (1, N - 2):
+        LHS[i, i - 1] = 1.0 / 4.0
+        LHS[i, i]     = 1.0
+        LHS[i, i + 1] = 1.0 / 4.0
+        RHS[i, i - 1] = -3.0 / (4.0 * h)
+        RHS[i, i + 1] =  3.0 / (4.0 * h)
+
+    # --- Borde i=0: esquema asimetrico forward 3er orden ---
+    LHS[0, 0] = 1.0
+    LHS[0, 1] = 2.0
+    RHS[0, 0] = -5.0 / (2.0 * h)
+    RHS[0, 1] =  2.0 / h
+    RHS[0, 2] =  1.0 / (2.0 * h)
+
+    # --- Borde i=N-1: esquema asimetrico backward 3er orden ---
+    LHS[N - 1, N - 1] = 1.0
+    LHS[N - 1, N - 2] = 2.0
+    RHS[N - 1, N - 1] =  5.0 / (2.0 * h)
+    RHS[N - 1, N - 2] = -2.0 / h
+    RHS[N - 1, N - 3] = -1.0 / (2.0 * h)
+
+    return np.linalg.solve(LHS, RHS)
+
+
+# Operadores de 1ra derivada (analogos a M_x, M_xi pero para primera derivada)
+D_x  = construir_operador_1ra_derivada(nx, dx)   # df/dx_m
+D_xi = construir_operador_1ra_derivada(ny, dxi)  # df/dxi
+
+#Definimos las siguientes funciones para que calculen la primera derivada de un campo 2D f a traves de cada eje
+def d_dx_compacta(f):    # df/dx_m  (sobre eje x, columnas)
+    return f @ D_x.T
+# Para aplicar la derivada a las columnas (eje x) multiplicamos f por la transpuesta de M_x
+
+def d_dxi_compacta(f):   # df/dxi  (sobre eje xi, filas)
+    return D_xi @ f
+
 #Definimos las siguientes funciones para que calculen la segunda derivada de un campo 2D f a traves de cada eje
 def d2_dx2_compacta(f):    # d2f/dx_m^2  (sobre eje x)
     return f @ M_x.T
 
-# Para aplicar la derivada a las columnas (eje x) multiplicamos f por la transpuesta de M_x
 
 def d2_dxi2_compacta(f):   # d2f/dxi^2  (sobre eje xi)
     return M_xi @ f # Aplicamos la derivada sobre las filas (eje xi)
 
 
 
+# ------------------- Filtro compacto Pade 6to orden (Lele 1992, Visbal & Gaitonde 2002) -------------------
+def construir_filtro_padre(N, alpha_f=0.49):
+    # alpha_f en [0, 0.5]. Cuanto mas cerca de 0.5, mas selectivo es el filtro (toca menos los modos fisicos)
+    a0 = (11.0 + 10.0 * alpha_f) / 16.0
+    a1 = (15.0 + 34.0 * alpha_f) / 32.0
+    a2 = (-3.0 +  6.0 * alpha_f) / 16.0
+    a3 = ( 1.0 -  2.0 * alpha_f) / 32.0
+    LHS = np.eye(N)
+    RHS = np.eye(N)
+    # Los 3 puntos de cada borde no se filtran (RHS = identidad), evita perturbar las CB
+    for i in range(3, N - 3):
+        LHS[i, i - 1] = alpha_f
+        LHS[i, i]     = 1.0
+        LHS[i, i + 1] = alpha_f
+        RHS[i, i]     = a0
+        RHS[i, i - 1] = a1 / 2.0; RHS[i, i + 1] = a1 / 2.0
+        RHS[i, i - 2] = a2 / 2.0; RHS[i, i + 2] = a2 / 2.0
+        RHS[i, i - 3] = a3 / 2.0; RHS[i, i + 3] = a3 / 2.0
+    return np.linalg.solve(LHS, RHS)
 
 
-# ------------------- Derivadas UPWIND de 1er orden (adveccion) -------------------
-# Calculamos la primera derivada con un esquema upwind (primer orden)
-# np.empty_like(f) reserva un array del mismo tamaño sin inicializar
-def deriv_upwind_x(f, vel, h): # vel: campo de velocidad, f:campo 2D y h: Espaciado
-    df_b = np.empty_like(f); df_b[:, 1:] = (f[:, 1:] - f[:, :-1]) / h; df_b[:, 0] = (f[:, 1] - f[:, 0]) / h # Constuye la diferencia hacia atrás (backward)
-    df_f = np.empty_like(f); df_f[:, :-1] = (f[:, 1:] - f[:, :-1]) / h; df_f[:, -1] = (f[:, -1] - f[:, -2]) / h
-    # la columna 0 no tiene vecino a la izquierda, así que la diferencia hacia atrás no existe; se rellena con la única disponible ( adelante) como caso de borde.
-    return np.where(vel >= 0, df_b, df_f) # Construye la diferencia hacia adelante
-    #  Donde la velocidad es ≥ 0 toma df_b (hacia atrás), y donde es < 0 toma df_f (hacia adelante)
-    # Cada punto de la malla decide según su propio signo de velocidad, no hay una decisión global.
+# Construye los operadores de filtro en cada direccion una sola vez
+F_x  = construir_filtro_padre(nx, alpha_f=0.49)
+F_xi = construir_filtro_padre(ny, alpha_f=0.49)
 
-def deriv_upwind_xi(f, vel, h): # Lo mismo pero para la componente xi
-    df_b = np.empty_like(f); df_b[1:, :] = (f[1:, :] - f[:-1, :]) / h; df_b[0, :] = (f[1, :] - f[0, :]) / h
-    df_f = np.empty_like(f); df_f[:-1, :] = (f[1:, :] - f[:-1, :]) / h; df_f[-1, :] = (f[-1, :] - f[-2, :]) / h
-    return np.where(vel >= 0, df_b, df_f)
+def aplicar_filtro_padre(f):
+    # Filtra en ambos ejes: primero en xi (filas), luego en x (columnas)
+    return F_xi @ (f @ F_x.T)
 
 
 # ------------------- Velocidad intermedia (Chorin) -------------------
@@ -197,16 +266,16 @@ def velocidad_intermedia(u, v, mu, dt, rho, dx, dxi, inv_R, term_corr):
     U_cx = u
     U_cxi = u * term_corr + v * inv_R
 
-    # ---- Adveccion: upwind de 1er orden (estabiliza) ----
-    adv_u = U_cx * deriv_upwind_x(u, U_cx, dx) + U_cxi * deriv_upwind_xi(u, U_cxi, dxi)
-    adv_v = U_cx * deriv_upwind_x(v, U_cx, dx) + U_cxi * deriv_upwind_xi(v, U_cxi, dxi)
+    # ---- Adveccion:   ----
+    adv_u = U_cx * d_dx_compacta(u) + U_cxi * d_dxi_compacta(u)
+    adv_v = U_cx * d_dx_compacta(v) + U_cxi * d_dxi_compacta(v)
 
-    # ---- Difusion: Laplaciano con 2da derivada COMPACTA ----
+    # ---- Difusion: Laplaciano con 2da derivada  ----
     # d2/dy^2 = inv_R^2 * d2/dxi^2  (exacto por el mapeo y = xi*R(x))
     d2u_dy2 = inv_R**2 * d2_dxi2_compacta(u)
     d2v_dy2 = inv_R**2 * d2_dxi2_compacta(v)
 
-    # d2/dx^2 ~= d2/dx_m^2 (compacto) + correccion de mapeo (termino pequeno)
+
     du_dx_m = np.gradient(u, dx, axis=1)
     dv_dx_m = np.gradient(v, dx, axis=1)
     d2u_dx2 = d2_dx2_compacta(u) + term_corr * np.gradient(du_dx_m, dxi, axis=0)
@@ -244,11 +313,11 @@ def construir_sistema_poisson(M_x, M_xi, inv_R):
         return j * nx + i
 
     # --- Condiciones de borde ---
-    # Paredes: Neumann dp/dxi = 0  ->  p[0,i]=p[1,i] , p[ny-1,i]=p[ny-2,i]
+    # Paredes: Neumann dp/dxi = 0  
     for i in range(nx):
         r = idx(0, i);    L.rows[r] = [idx(0, i),    idx(1, i)];    L.data[r] = [1.0, -1.0]
         r = idx(ny - 1, i); L.rows[r] = [idx(ny - 1, i), idx(ny - 2, i)]; L.data[r] = [1.0, -1.0]
-    # Entrada: Neumann dp/dx = 0  ->  p[j,0]=p[j,1]
+    # Entrada: Neumann dp/dx = 0 
     for j in range(ny):
         r = idx(j, 0); L.rows[r] = [idx(j, 0), idx(j, 1)]; L.data[r] = [1.0, -1.0]
     # Salida: Dirichlet p = 0  (ancla la presion)
@@ -289,14 +358,106 @@ def paso_correccion(u_star, v_star, p, dt, rho, dx, dxi, inv_R, term_corr):
 
 
 # =============================================================================
+#               Animación
+# =============================================================================
+import matplotlib.animation as animation
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
+
+def generar_video_simulacion(frames_video, caudal_m3s, re_nominal, v_max,
+                             X, Y, R_limite, x, fps_video=20):
+    # frames_video: lista de tuplas (t, u, v) capturadas durante el ciclo temporal
+    # del caso de caudal mayor. Cada tupla es un instante de la simulacion.
+    if len(frames_video) == 0:
+        print("  No hay frames capturados: no se genera video.")
+        return
+
+    print(f"\n  Renderizando video de la simulacion ({len(frames_video)} frames)...")
+
+    # Malla regular para interpolar cada frame. Algo mas ligera que la del post-proceso
+    # para acelerar el render sin perder calidad visual apreciable.
+    x_lin_v = np.linspace(0, Lt, 160)
+    y_lin_v = np.linspace(np.min(Y), np.max(Y), 80)
+    X_reg_v, Y_reg_v = np.meshgrid(x_lin_v, y_lin_v)
+    puntos_v = np.column_stack((X.flatten(), Y.flatten()))
+
+    # Escala de color FIJA para todo el video (0 .. v_max) -> los instantes son comparables
+    niveles_v = np.linspace(0, v_max, 60)
+    norma_v = Normalize(vmin=0, vmax=v_max)
+
+    fig, ax = plt.subplots(figsize=(13, 5), facecolor='white')
+
+    # Barra de color creada una sola vez (independiente del contourf de cada frame)
+    sm = ScalarMappable(norm=norma_v, cmap='jet')
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, orientation='horizontal', pad=0.12, fraction=0.04)
+    cbar.set_label('Magnitud de Velocidad (m/s)', fontsize=11, fontweight='bold')
+
+    def dibujar_frame(k):
+        # Redibuja por completo el eje principal en cada instante k
+        ax.clear()
+        t_k, u_k, v_k = frames_video[k]
+
+        # Interpolamos el campo de velocidad del instante a la malla regular
+        u_reg = griddata(puntos_v, u_k.flatten(), (X_reg_v, Y_reg_v), method='linear', fill_value=0)
+        v_reg = griddata(puntos_v, v_k.flatten(), (X_reg_v, Y_reg_v), method='linear', fill_value=0)
+        mag = np.sqrt(u_reg**2 + v_reg**2)
+
+        # Campo de magnitud + lineas de corriente del instante
+        ax.contourf(X_reg_v, Y_reg_v, mag, levels=niveles_v, cmap='jet', extend='max')
+        ax.streamplot(X_reg_v, Y_reg_v, u_reg, v_reg, color='black',
+                      linewidth=0.6, density=2.0, arrowsize=0.7)
+
+        # Paredes de la arteria y enmascarado exterior (igual que en el post-proceso)
+        ax.plot(X[0, :], Y[0, :], color='black', linewidth=2.5)
+        ax.plot(X[-1, :], Y[-1, :], color='black', linewidth=2.5)
+        ax.fill_between(x, R_limite, 0.04, color='white', zorder=10)
+        ax.fill_between(x, -R_limite, -0.04, color='white', zorder=10)
+
+        ax.axis('off')
+        ax.set_xlim(0, Lt)
+        ax.set_ylim(-0.035, 0.035)
+        ax.set_aspect('equal')
+        ax.set_title(f"Evolucion del flujo en el aneurisma  |  t = {t_k:.4f} s   "
+                     f"(Q = {caudal_m3s:.2e} m3/s,  Re = {re_nominal:.0f})",
+                     fontsize=12, fontweight='bold')
+        return []
+
+    anim = animation.FuncAnimation(fig, dibujar_frame, frames=len(frames_video), blit=False)
+
+    # Guardado: se intenta MP4 (ffmpeg) y, si no esta disponible, se cae a GIF (Pillow)
+    nombre_video = f"Simulacion_Video_FlowRate_{caudal_m3s:.2e}_m3s.mp4"
+    try:
+        writer = animation.FFMpegWriter(fps=fps_video, bitrate=3000)
+        anim.save(nombre_video, writer=writer, dpi=130)
+        print(f"--> Video guardado: {nombre_video}")
+    except Exception as e:
+        print(f"  ffmpeg no disponible ({e}). Generando GIF con Pillow...")
+        nombre_video = f"Simulacion_Video_FlowRate_{caudal_m3s:.2e}_m3s.gif"
+        try:
+            writer = animation.PillowWriter(fps=fps_video)
+            anim.save(nombre_video, writer=writer, dpi=110)
+            print(f"--> Video (GIF) guardado: {nombre_video}")
+        except Exception as e2:
+            print(f"  No se pudo guardar el video: {e2}")
+
+    plt.close(fig)
+
+
+# =============================================================================
 #  Ciclo principal
 # =============================================================================
 
 # Utilizamos Euler explícito de primer orden
 
-velocidades_prueba = [0.3, 0.8, 1.2, 1.6] # Distintas velocidades maxima de prueba
-t_final = 0.21250 # Tiempo final de estudio
+velocidades_prueba = [0.20, 0.30, 0.40, 0.50] # Distintas velocidades maxima de prueba 
+t_final = 0.6 # Tiempo final de estudio
 intervalo_print = 200 # Cada cuantas iteraciones se imprime el estado
+
+# Parametros del video: solo se usan para el escenario del caudal mayor.
+v_max_video = max(velocidades_prueba)   # caso para el que se generara el video
+intervalo_frame_video = 100             # cada cuantas iteraciones se captura un frame
+fps_video = 20                          # cuadros por segundo del video final
 
 # Acumuladores de WSS para el grafico comparativo final
 historial_wss_superior = {}
@@ -324,7 +485,12 @@ for v_max in velocidades_prueba:
     t = 0
     iteracion = 0
 
-    # 3. Ciclo temporal 
+    # Captura de frames para el video: la lista solo se llena cuando este
+    # caso corresponde al caudal mayor. En el resto de los casos queda vacia.
+    es_caso_video = np.isclose(v_max, v_max_video)
+    frames_video = []
+
+    # Ciclo temporal 
     while t < t_final:
         u_ant, v_ant = u.copy(), v.copy()
 
@@ -342,7 +508,9 @@ for v_max in velocidades_prueba:
         dy_min = np.min((1.0 / inv_R) * dxi) # Tamaño físico de celda más pequeña
 
         # Como el esquema es explícito, hay dos restricciones
+        
         dt_cfl = 1.0 / (u_max_local / dx + v_max_local / dy_min) # CFL advectiva
+        
         dt_dif = (rho * (dx * dy_min)**2) / (2.0 * mu_max * (dx**2 + dy_min**2)) # difusiva/viscosa 
         dt = 0.30 * min(dt_cfl, dt_dif)            # factor de seguridad
         dt = min(dt, 0.00005) # techo absoluto 
@@ -350,6 +518,11 @@ for v_max in velocidades_prueba:
         u_star, v_star = velocidad_intermedia(u_ant, v_ant, mu, dt, rho, dx, dxi, inv_R, term_corr)
         p = resolver_poisson_directo(u_star, v_star, dt, rho, dx, dxi, inv_R, term_corr)
         u, v = paso_correccion(u_star, v_star, p, dt, rho, dx, dxi, inv_R, term_corr)
+
+        # Filtro compacto Pade selectivo: elimina los modos de longitud 2*dx (no resueltos por la malla)
+        # sin tocar los modos fisicamente resueltos.
+        u = aplicar_filtro_padre(u)
+        v = aplicar_filtro_padre(v)
 
         # Reaplicamos las condiciones de borde por si la proyeccion las altero 
         u[:, 0] = v_entrada * (1 - xi**2)
@@ -370,6 +543,12 @@ for v_max in velocidades_prueba:
         t += dt
         iteracion += 1
 
+        # Captura del estado actual para el video: solo en el caudal mayor y
+        # cada 'intervalo_frame_video' iteraciones. Se guardan copias para no aliasar
+        # los arreglos del solver; no altera en absoluto la logica de la simulacion.
+        if es_caso_video and (iteracion % intervalo_frame_video == 0):
+            frames_video.append((t, u.copy(), v.copy()))
+
         if iteracion % intervalo_print == 0:
             print(f"  it={iteracion:6d} | t={t:.5f}s | dt={dt:.2e} | "
                   f"|u*|max={np.max(np.abs(u_star)):.4f} | "
@@ -379,7 +558,7 @@ for v_max in velocidades_prueba:
     print("  Simulacion del caso completada. Post-procesando (WSS + streamlines + viscosidad)...")
 
     # -------------------------------------------------------------------------
-    # WSS al finalizar t_final para este caudal (usa 'mu' de la ultima iteracion del ciclo).
+    # WSS al finalizar t_final para este caudal 
     # -------------------------------------------------------------------------
     du_dxi_final = np.gradient(u, dxi, axis=0)
     du_dy_final = inv_R * du_dxi_final
@@ -446,8 +625,7 @@ for v_max in velocidades_prueba:
 
     fig, ax = plt.subplots(figsize=(13, 5), facecolor='white')
 
-    # Escala fija [mu_inf, mu_0] para que
-    # los casos sean comparables entre si.
+    # Escala fija [mu_inf, mu_0]
     niveles = np.linspace(mu_inf, mu_0, 80)
     cf = ax.contourf(X_reg, Y_reg, mu_reg, levels=niveles, cmap='jet', extend='both')
 
@@ -465,15 +643,16 @@ for v_max in velocidades_prueba:
     ax.axis('off')
     ax.axis('equal')
     ax.set_ylim(-0.035, 0.035)
-
-    titulo_mu = (f"Mapa de Viscosidad (Carreau) en Aneurisma a t = {t_final:.4f} s\n"
-                 f"Flow Rate: {caudal_m3s:.2e} m$^3$/s  |  Re: {re_nominal:.0f}  |  V_max: {v_max} m/s")
-    plt.title(titulo_mu, fontsize=14, fontweight='bold', pad=15)
-
     nombre_visc = f"Viscosidad_FlowRate_{caudal_m3s:.2e}_m3s.png"
     plt.savefig(nombre_visc, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"--> Grafico guardado: {nombre_visc}\n")
+
+
+    # -----------------------  Video de la simulacion -----------------------
+    if es_caso_video:
+        generar_video_simulacion(frames_video, caudal_m3s, re_nominal, v_max,
+                                 X, Y, R_limite, x, fps_video=fps_video)
 
 
 # =============================================================================
@@ -488,10 +667,6 @@ for idx, (etiqueta, wss_sup) in enumerate(historial_wss_superior.items()):
     ax.plot(x, wss_sup, label=f'{etiqueta}', color=colores[idx % len(colores)], linewidth=2.2)
 
 ax.axvspan(L1, L1 + L2, color='gray', alpha=0.15, label='Zona del Saco Aneurismatico')
-"""
-ax.set_title("Comparacion de Wall Shear Stress (Pared del Aneurisma) a distintos Caudales",
-             fontsize=15, fontweight='bold', pad=15)
-"""
 ax.set_xlabel("Largo de la arteria $x$ (m)", fontsize=13)
 ax.set_ylabel("Wall Shear Stress $\\tau_w$ (Pa)", fontsize=13)
 
@@ -509,7 +684,6 @@ plt.savefig(nombre_grafico_wss, dpi=200)
 plt.close()
 
 print(f"--> Grafico de comparacion de WSS guardado como '{nombre_grafico_wss}'")
-
 
 
 
