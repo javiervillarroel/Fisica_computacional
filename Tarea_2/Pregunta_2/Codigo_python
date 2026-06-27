@@ -1,0 +1,285 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import quad
+
+np.random.seed(42)
+
+# Constantes físicas 
+me_c2   = 0.511          # Masa del electrón en reposo en MeV
+mp_c2   = 938.272        # Masa del protón en reposo en MeV
+re      = 2.8179403e-13  # Radio clásico del electrón en cm
+NA      = 6.02214076e23  # Número de Avogadro
+K_BB    = 0.307075       # Constante de Bethe-Bloch (= 4π NA re^2 me c^2) MeV·cm^2/g
+
+# Propiedades del agua líquida
+Z_water   = 10           # Z efectivo de H₂O (2×1 + 8)
+A_water   = 18.015       # Masa molar del agua es g/mol
+rho_water = 1.0          # Densidad del agua g/cm^3
+I_water   = 75.0e-6      # Potencial medio de excitación (75 eV) en MeV 
+X0_water  = 36.08        # Longitud de radiación del agua en cm 
+
+# Densidad electrónica del agua
+Ne_water = rho_water * NA * Z_water / A_water  # electrones/cm^3
+
+
+# ============================================================
+# Parte (b): Implementación de Bethe-Bloch y rango CSDA
+# ============================================================
+print("=" * 70)
+print("PARTE (b): Bethe-Bloch y rango CSDA")
+print("=" * 70)
+
+def bethe_bloch(T): 
+    if T < 0.01:
+        return 0.0
+    
+    # Cinemática relativista del protón
+    gamma = 1.0 + T / mp_c2         # Factor de lorentz              
+    beta2 = 1.0 - 1.0 / gamma**2              
+    beta2_gamma2 = gamma**2 - 1.0              
+    
+    if beta2 < 1e-10:
+        return 0.0
+    
+    # Energía máxima transferible a un electrón en una colisión
+    Tmax = (2 * me_c2 * beta2_gamma2 /
+            (1 + 2 * gamma * me_c2 / mp_c2 + (me_c2 / mp_c2)**2))
+    
+    # Argumento del logaritmo
+    arg = 2 * me_c2 * beta2_gamma2 * Tmax / I_water**2
+    if arg <= 0:
+        return 0.0
+    
+    # Fórmula de Bethe-Bloch (z=1 para protones)
+    dEdx = (K_BB * (Z_water / A_water) * rho_water / beta2 *
+            (0.5 * np.log(arg) - beta2))
+    
+    return max(dEdx, 0.0)
+
+
+def csda_range(E0, dE_step=0.01):  # Calculamos el rango CSDA
+    # Integramos numéricamente de E₀ a 0 asumiendo pérdida continua.
+    R = 0.0 
+    E = E0  # Energía inicial del protón [MeV]
+    while E > 0.1:   # Integramos hasta E = 0.1 MeV
+        step = min(dE_step, E - 0.1)
+        if step <= 0:
+            break
+         
+        # Evaluamos en el punto medio del paso (mayor precisión)
+        E_mid = E - step / 2
+        dEdx = bethe_bloch(E_mid)  # Paso de integración en energía [MeV]
+        if dEdx <= 0:
+            break
+        R += step / dEdx
+        E -= step
+    return R
+
+energias_test = [50, 150, 250] # Valores tabulados
+
+# Valores NIST PSTAR para protones en agua líquida
+nist_ranges = {50: 2.175, 150: 15.82, 250: 37.68}  
+
+print(f"\n{'E₀ [MeV]':>10} {'R_CSDA [cm]':>14} {'R_NIST [cm]':>14} {'Error [%]':>12}")
+print("-" * 55)
+for E0 in energias_test:
+    R = csda_range(E0, dE_step=0.05)
+    R_nist = nist_ranges[E0]
+    error = abs(R - R_nist) / R_nist * 100
+    print(f"{E0:>10} {R:>14.2f} {R_nist:>14.2f} {error:>12.1f}")
+print()
+
+# --- Gráfico del stopping power ---
+E_plot = np.linspace(1, 300, 1000)
+dEdx_plot = np.array([bethe_bloch(E) for E in E_plot])
+
+# Asignamos la figura a la variable fig1
+fig1, axes1 = plt.subplots(1, 2, figsize=(14, 5))
+
+# Panel 1: Stopping power vs energía
+ax = axes1[0]
+ax.plot(E_plot, dEdx_plot, 'b-', linewidth=2)
+ax.set_xlabel('Energía cinética T [MeV]', fontsize=12)
+ax.set_ylabel('-dE/dx [MeV/cm]', fontsize=12)
+ax.set_title('Poder de frenado de Bethe-Bloch\n(protones en agua)')
+ax.set_yscale('log')
+ax.set_xscale('log')
+ax.grid(True, alpha=0.3, which='both')
+ax.set_xlim(1, 300)
+
+for E0 in energias_test:
+    dEdx_val = bethe_bloch(E0)
+    ax.plot(E0, dEdx_val, 'ro', markersize=8, zorder=5)
+    ax.annotate(f'{E0} MeV\n{dEdx_val:.1f} MeV/cm',
+                xy=(E0, dEdx_val), xytext=(E0*1.3, dEdx_val*1.5),
+                fontsize=9, arrowprops=dict(arrowstyle='->', color='red'))
+
+# Panel 2: Rango CSDA vs energía
+ax = axes1[1]
+E_range = np.linspace(10, 260, 50)
+R_range = [csda_range(E, dE_step=0.1) for E in E_range]
+ax.plot(E_range, R_range, 'b-', linewidth=2, label='Cálculo Bethe-Bloch')
+
+for E0 in energias_test:
+    ax.plot(E0, nist_ranges[E0], 'rs', markersize=10, zorder=5)
+ax.plot([], [], 'rs', markersize=10, label='NIST PSTAR')
+
+ax.set_xlabel('Energía inicial E₀ [MeV]', fontsize=12)
+ax.set_ylabel('Rango CSDA [cm]', fontsize=12)
+ax.set_title('Rango CSDA en agua\n(comparación con NIST PSTAR)')
+ax.legend(fontsize=11)
+ax.grid(True, alpha=0.3)
+
+plt.figure(fig1.number)
+plt.suptitle('Parte (b): Bethe-Bloch para protones en agua', fontweight='bold', fontsize=14)
+plt.tight_layout()
+
+
+
+# ============================================================
+# Parte (c): Simulación MC sin straggling (determinista)
+# ============================================================
+print("=" * 70)
+print("PARTE (c): Simulación MC — N=10⁴ protones, sin straggling")
+print("=" * 70)
+
+N_protons = 10000    
+E0 = 150.0           
+dx = 0.01            
+max_depth = 20.0     
+n_bins = int(max_depth / dx)
+
+E_table = np.linspace(0.01, 300, 30000)
+dEdx_table = np.array([bethe_bloch(E) for E in E_table])
+
+def dEdx_fast(E):
+    if E < 0.01:
+        return 0.0
+    idx = int((E - 0.01) / (300 - 0.01) * 29999)
+    idx = max(0, min(idx, 29998))
+    frac = (E - E_table[idx]) / (E_table[idx+1] - E_table[idx])
+    return dEdx_table[idx] + frac * (dEdx_table[idx+1] - dEdx_table[idx])
+
+print(f"Simulando {N_protons} protones (E₀ = {E0} MeV, Δx = {dx*10:.1f} mm)...")
+dose_no_strag = np.zeros(n_bins)
+
+E = E0
+for j in range(n_bins):
+    if E < 0.1:
+        break
+    dE = dEdx_fast(E) * dx        
+    dE = min(dE, E)                
+    dose_no_strag[j] = dE          
+    E -= dE
+
+dose_no_strag *= N_protons
+R_csda_sim = j * dx   
+
+print(f"  Rango CSDA (simulado): {R_csda_sim:.2f} cm")
+print(f"  Rango CSDA (cálculo):  {csda_range(E0, 0.05):.2f} cm")
+print(f"  Pico de Bragg en z ≈ {np.argmax(dose_no_strag)*dx:.2f} cm\n")
+
+
+# ============================================================
+# Parte (d): Simulación MC con energy straggling
+# ============================================================
+print("=" * 70)
+print("PARTE (d): Simulación MC — con energy straggling")
+print("=" * 70)
+
+def bohr_sigma(T, dx):
+    if T < 0.01:
+        return 0.0
+    sigma2 = 4 * np.pi * re**2 * me_c2**2 * Ne_water * 1.0 * dx
+    return np.sqrt(sigma2)
+
+print(f"  Simulando {N_protons} protones con straggling...")
+
+dose_strag = np.zeros(n_bins)
+ranges_strag = np.zeros(N_protons)
+
+for i in range(N_protons):
+    E = E0
+    for j in range(n_bins):
+        if E < 0.1:
+            break
+        
+        mean_dE = dEdx_fast(E) * dx
+        sigma_E = bohr_sigma(E, dx)
+        dE = np.random.normal(mean_dE, sigma_E)
+        
+        dE = max(0, min(dE, E))   
+        dose_strag[j] += dE
+        E -= dE
+    
+    ranges_strag[i] = j * dx
+
+R_mean = np.mean(ranges_strag)
+R_std = np.std(ranges_strag)
+print(f"  Rango medio: {R_mean:.2f} cm")
+print(f"  σ_R (ensanchamiento): {R_std:.4f} cm = {R_std*10:.2f} mm\n")
+
+
+# ============================================================
+# Gráficos finales de la parte C y D
+# ============================================================
+
+z_axis = np.arange(n_bins) * dx 
+
+# Asignamos la figura a la variable fig2
+fig2, axes2 = plt.subplots(2, 2, figsize=(14, 10))
+
+# Panel (1): Dosis D(z) — sin straggling
+ax = axes2[0, 0]
+dose_per_proton_no = dose_no_strag / N_protons
+ax.plot(z_axis, dose_per_proton_no, 'b-', linewidth=1.5)
+ax.axvline(R_csda_sim, color='red', linestyle='--', alpha=0.7, label=f'R_CSDA = {R_csda_sim:.2f} cm')
+ax.set_xlabel('Profundidad z [cm]')
+ax.set_ylabel('Dosis [MeV/protón/bin]')
+ax.set_title('Parte (c): D(z) sin straggling')
+ax.legend()
+ax.grid(True, alpha=0.3)
+ax.set_xlim(0, 18)
+
+# Panel (2): Dosis D(z) — con straggling
+ax = axes2[0, 1]
+dose_per_proton_st = dose_strag / N_protons
+ax.plot(z_axis, dose_per_proton_st, 'r-', linewidth=1.5)
+ax.axvline(R_mean, color='darkred', linestyle='--', alpha=0.7, label=f'R_medio = {R_mean:.2f} cm')
+ax.set_xlabel('Profundidad z [cm]')
+ax.set_ylabel('Dosis [MeV/protón/bin]')
+ax.set_title('Parte (d): D(z) con straggling')
+ax.legend()
+ax.grid(True, alpha=0.3)
+ax.set_xlim(0, 18)
+
+# Panel (3): Comparación superpuesta
+ax = axes2[1, 0]
+z_zoom = (z_axis > 13) & (z_axis < 17.5)
+ax.plot(z_axis[z_zoom], dose_per_proton_no[z_zoom], 'b-', linewidth=2, label='Sin straggling')
+ax.plot(z_axis[z_zoom], dose_per_proton_st[z_zoom], 'r-', linewidth=2, alpha=0.8, label='Con straggling')
+ax.axvline(R_csda_sim, color='blue', linestyle=':', alpha=0.5)
+ax.axvline(R_mean, color='red', linestyle=':', alpha=0.5)
+ax.set_xlabel('Profundidad z [cm]')
+ax.set_ylabel('Dosis [MeV/protón/bin]')
+ax.set_title('Comparación: zoom en el pico de Bragg')
+ax.legend()
+ax.grid(True, alpha=0.3)
+
+# Panel (4): Distribución de rangos
+ax = axes2[1, 1]
+ax.hist(ranges_strag, bins=80, density=True, color='salmon', edgecolor='darkred', alpha=0.7, label='Distribución de rangos')
+ax.axvline(R_mean, color='red', linestyle='-', linewidth=2, label=f'Media = {R_mean:.2f} cm')
+ax.axvline(R_csda_sim, color='blue', linestyle='--', linewidth=2, label=f'R_CSDA = {R_csda_sim:.2f} cm')
+ax.axvspan(R_mean - R_std, R_mean + R_std, alpha=0.15, color='red', label=f'σ_R = {R_std:.3f} cm')
+ax.set_xlabel('Rango [cm]')
+ax.set_ylabel('Densidad de probabilidad')
+ax.set_title(f'Distribución de rangos (N = {N_protons})')
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+
+plt.figure(fig2.number)
+plt.suptitle('Problema 2: Pico de Bragg — Terapia con protones (E₀ = 150 MeV)', fontweight='bold', fontsize=14)
+plt.tight_layout()
+print(" Desplegando todas las ventanas de gráficos simultáneamente.")
+plt.show()
